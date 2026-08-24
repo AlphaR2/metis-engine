@@ -97,17 +97,27 @@ sits in the vault.
 **Instruction: `settle_market`**
 
 1. The authority (currently the one fixed protocol pubkey stored on the
-   market — not a real oracle, a stand-in for one) sends `market` and
-   signs as `authority`, along with the `winning_outcome`.
+   market — not a real oracle, a stand-in for one) sends `market`,
+   `vault`, and signs as `authority`, along with the `winning_outcome`.
 2. On-chain, the program:
    - Checks the signer is literally the pubkey the market itself
      recorded as its authority — not just "someone signed."
    - Checks `status == Open` (one check that rejects both an
      already-settled market and a market that somehow never opened).
    - Checks `winning_outcome` is a real outcome for this market.
+   - Checks `vault`'s discriminator and back-reference, then checks its
+     **actual lamport balance** matches `rent_minimum + total_collected`
+     exactly. This is the one moment that check can hold true — before
+     settlement, no claim has paid anyone yet, so the equality is exact.
+     Any drift trips `VaultBalanceMismatch` and stops before the market
+     is ever locked in for payouts. (This check used to live in `claim`;
+     it moved here, since a vault legitimately shrinks with every
+     payout — checking for exact equality *after* claims have started
+     would reject every claim past the first one on every market.)
    - Flips `status` to `Settled`, records `winning_outcome`.
 
-**No money moves in this instruction.** It only decides who's right.
+**No money moves in this instruction.** It only decides who's right, and
+confirms the books balance before anyone can claim against them.
 
 ---
 
@@ -121,11 +131,9 @@ sits in the vault.
    - Reads `Market` once: must be `Settled`, and this is where
      `winning_outcome`, `total_collected`, and the winning side's total
      share count all come from, in a single borrow.
-   - Reads `Vault`, checks its discriminator and back-reference — and
-     checks its **actual lamport balance** matches
-     `rent_minimum + total_collected` exactly. Any drift trips
-     `VaultBalanceMismatch` and stops before paying out against a number
-     that might be wrong.
+   - Reads `Vault`, checks its discriminator and back-reference only —
+     the balance sanity check now lives in `settle_market` (see Flow 3),
+     since it's only ever true before any payouts have happened.
    - Reads `Position`: must belong to this market and this bettor
      specifically, and must not already be `claimed`.
    - Computes `payout = (my winning shares × total_collected) ÷ (all
@@ -172,6 +180,14 @@ their `Position` no longer exists, the vault has that much less in it.
   is never stored, never paid out, and cancels out exactly in the delta
   math — real share counts come out identical either way. Settlement and
   payout math never touch it.
+- **`padded_price`'s rounding caveat.** This function divides by `cost()`,
+  an *integer* square root that rounds down. At small pool sizes that's a
+  real source of error — a fresh (7,7) market computes as ~60.5%/60.5%
+  instead of the true 50%/50%, and the two don't even sum to 100%. Shrinks
+  to negligible at the real `MARKET_INIT_FEE` scale, but anything reading
+  this function directly for a small or freshly-opened market should know
+  about it — worth fixing by computing that one division in floating
+  point rather than reusing the integer `cost()`.
 
 ---
 
@@ -201,15 +217,21 @@ logic (pricing, status transitions, payouts).
 ## What's deliberately not built yet
 
 - No selling back into the pool — Phase 2 / CLOB doesn't exist.
+- No fee on `place_bet` — the full deposit becomes `D` directly. (Some
+  design docs describe a primary fee; if that's wanted, it needs adding.)
 - No creator royalty split.
 - `authority` is one fixed protocol pubkey, not a real oracle.
 - No batching — every `place_bet` is priced against whatever the pool
   looked like the instant before it, one bet at a time. Virtual liquidity
   softens this; it doesn't remove the underlying order-dependence.
-- The dispatcher (`lib.rs`) and the instructions all compile individually,
-  but end-to-end litesvm tests haven't run successfully yet — blocked on
-  an unresolved `litesvm`/`solana-program-runtime` version conflict,
-  intentionally left for later.
+- No `min_shares_out` or any other user-facing slippage guard on
+  `place_bet` — worth adding independent of the CLOB, since it protects
+  an individual buyer today and needs no new infrastructure.
+
+**Status update:** all 19 tests pass end-to-end (`cargo test`), including
+a 35-bettor scenario proving solvency at scale — the earlier `litesvm`
+version conflict is resolved (now `0.16.0` on crates.io, no git
+workaround needed).
 
 ## Open questions worth resolving before this goes further
 
