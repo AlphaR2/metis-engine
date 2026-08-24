@@ -1,0 +1,27 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "compute-discriminators"
+path = "src/bin/compute_discriminators.rs"
+
+[target.'cfg(not(target_os = "solana"))'.dependencies]
+sha2 = "0.10"
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+pinocchio = "0.11.2"
+pinocchio-system = "0.6.1"
+sha2 = "0.10"
+solana-address = { version = "2.6.1", features = ["bytemuck", "decode"] }
+
+[dev-dependencies]
+litesvm = "0.16.0"
+litesvm-utils = "0.4.0"
+solana-sdk = "4"
+solana-system-interface = "3"
