@@ -1,0 +1,30 @@
+[package]
+name = "openstake-core"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "openstake_core"
+crate-type = ["cdylib", "lib"]
+
+[[bench]]
+name = "curve_bench"
+harness = false
+
+[[bench]]
+name = "settlement_bench"
+harness = false
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+pinocchio = "0.11.2"
+pinocchio-system = "0.6.1"
+solana-address = { version = "2.6.1", features = ["bytemuck", "decode"] }
+
+[dev-dependencies]
+criterion = "0.5"
+litesvm = "0.16.0"
+litesvm-utils = "0.4.0"
+proptest = "1.6"
+solana-sdk = "4"
+solana-system-interface = "3"
