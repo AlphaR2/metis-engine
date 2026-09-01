@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use openstake_core::settlement::payout::compute_payout;
 
 fn bench_compute_payout(c: &mut Criterion) {

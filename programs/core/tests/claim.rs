@@ -1,172 +1,403 @@
 mod common;
-// Tier 1 + Tier 3: claim — full lifecycle (init -> two bettors, opposite
-// sides -> settle -> winner claims, loser claims) plus the two rejections
-// that don't need a separate market to set up.
+// Cashing in. Winners burn their shares for a slice of the pool; losers get
+// nothing. Includes the case most likely to break silently: several people
+// claiming one after another.
+//
+// To see the printed output:
+//   cargo test -p openstake-core --test claim -- --nocapture --test-threads=1
 
-use bytemuck::from_bytes;
-use solana_sdk::signature::Signer;
+use solana_sdk::{pubkey::Pubkey, signature::Keypair, signature::Signer};
 
-use crate::common::{
-    advance_clock_past, authority_keypair, current_clock_ts, funded_keypair, ix_claim,
-    ix_initialize_market, ix_place_bet, ix_settle_market, market_pda, position_pda, send, setup,
-    setup_with_config, vault_pda,
-};
-use openstake_core::{constants::MARKET_INIT_FEE, amm::state::Position};
+use crate::common::*;
+use openstake_core::constants::MARKET_INIT_FEE;
 
-#[test]
-fn full_lifecycle_winner_gets_paid_loser_gets_rent_back() {
-    let mut svm = setup();
-    let config = setup_with_config(&mut svm);
-    let creator = funded_keypair(&mut svm, 10 * MARKET_INIT_FEE);
-    let nonce = 20u64;
+fn usd(raw: u64) -> String {
+    format!("${:.2}", raw as f64 / 1e6)
+}
 
-    let (market, _) = market_pda(&creator.pubkey(), nonce);
-    let (vault, _) = vault_pda(&market);
-    let (creator_position, _) = position_pda(&market, &creator.pubkey());
+fn sh(raw: u64) -> String {
+    format!("{:.2}", raw as f64 / 1e6)
+}
 
-    let bet_close_ts = current_clock_ts(&svm) + 60;
-    send(
-        &mut svm,
-        ix_initialize_market(&creator.pubkey(), &market, &vault, &creator_position, nonce, 2, bet_close_ts, &config),
-        &creator,
-        &[],
-    )
-    .expect("initialize_market should succeed");
+// Opens a market, runs the given bets, settles on `winner`, and hands back the
+// bettors so the test can claim for them.
+fn market_with_bets(
+    svm: &mut litesvm::LiteSVM,
+    nonce: u64,
+    bets: &[(u8, u64)],
+    winner: u8,
+) -> (TestMarket, Vec<(Keypair, Pubkey)>) {
+    let close_ts = default_close_ts(svm);
+    let m = open_market(svm, nonce, close_ts);
 
-    // Alice backs the winning side (A), Ben backs the losing side (B).
-    let alice = funded_keypair(&mut svm, 20 * MARKET_INIT_FEE);
-    let (alice_position, _) = position_pda(&market, &alice.pubkey());
-    send(
-        &mut svm,
-        ix_place_bet(&market, &vault, &alice_position, &alice.pubkey(), 0, 5 * MARKET_INIT_FEE, &config),
-        &alice,
-        &[],
-    )
-    .expect("Alice's bet should succeed");
+    let mut bettors = Vec::new();
+    for (i, (side, amount)) in bets.iter().enumerate() {
+        let (kp, quote_ata) = funded_bettor(svm, 1_000 * MARKET_INIT_FEE);
+        send(
+            svm,
+            ix_place_bet(
+                &m.market,
+                &m.vault,
+                &kp.pubkey(),
+                &quote_ata,
+                *side,
+                *amount,
+                &m.config,
+            ),
+            &kp,
+            &[],
+        )
+        .unwrap_or_else(|e| panic!("bet {i} should succeed: {e:?}"));
+        bettors.push((kp, quote_ata));
+    }
 
-    let ben = funded_keypair(&mut svm, 20 * MARKET_INIT_FEE);
-    let (ben_position, _) = position_pda(&market, &ben.pubkey());
-    send(
-        &mut svm,
-        ix_place_bet(&market, &vault, &ben_position, &ben.pubkey(), 1, 3 * MARKET_INIT_FEE, &config),
-        &ben,
-        &[],
-    )
-    .expect("Ben's bet should succeed");
-
-    advance_clock_past(&mut svm, bet_close_ts);
+    advance_clock_past(svm, close_ts);
     let authority = authority_keypair();
     send(
-        &mut svm,
-        ix_settle_market(&market, &vault, &authority.pubkey(), 0), // A wins
-        &creator,
+        svm,
+        ix_settle_market(&m.market, &m.vault, &authority.pubkey(), winner),
+        &m.creator,
         &[&authority],
     )
     .expect("settle_market should succeed");
 
-    let ben_balance_before = svm.get_account(&ben.pubkey()).unwrap().lamports;
-
-    // Alice (winner) claims.
-    send(&mut svm, ix_claim(&market, &vault, &alice_position, &alice.pubkey()), &alice, &[])
-        .expect("winning claim should succeed");
-    assert!(
-        svm.get_account(&alice_position).is_none(),
-        "Alice's position should be closed after claiming (drained to zero lamports)"
-    );
-
-    // Ben (loser) claims — gets nothing from the pot, just rent back.
-    send(&mut svm, ix_claim(&market, &vault, &ben_position, &ben.pubkey()), &ben, &[])
-        .expect("losing claim should still succeed — no payout, but rent comes back");
-    assert!(svm.get_account(&ben_position).is_none(), "Ben's position should also close");
-
-    let ben_balance_after = svm.get_account(&ben.pubkey()).unwrap().lamports;
-    assert!(
-        ben_balance_after > ben_balance_before,
-        "Ben should have gotten his position's rent back even though he lost"
-    );
-
-    // Creator holds seed shares on BOTH outcomes (initialize_market splits
-    // the fee evenly) — including the winning side, A. Their slice of the
-    // pot stays in the vault, legitimately, until they claim it too.
-    send(&mut svm, ix_claim(&market, &vault, &creator_position, &creator.pubkey()), &creator, &[])
-        .expect("creator's own claim should succeed");
-    assert!(svm.get_account(&creator_position).is_none(), "creator's position should also close");
-
-    // Vault should be left holding only its own rent-exempt minimum, plus
-    // possibly a few lamports of dust — payout division floors toward the
-    // pool (design doc §8), so a handful of lamports can go unclaimed by
-    // anyone. Not a bug; exact-equality would be the wrong assertion here.
-    let vault_account = svm.get_account(&vault).unwrap();
-    let rent_minimum = svm.minimum_balance_for_rent_exemption(core::mem::size_of::<openstake_core::settlement::state::Vault>());
-    let dust = vault_account.lamports.saturating_sub(rent_minimum);
-    assert!(
-        dust < 10,
-        "vault should hold its rent-exempt minimum plus at most a few lamports of \
-         rounding dust once everyone has claimed — got {dust} lamports of dust"
-    );
+    (m, bettors)
 }
 
+// The happy path: shares are burned, USDC comes back. Burning is what makes
+// the claim permanent - the tokens stop existing rather than being flagged.
 #[test]
-fn claim_before_settlement_is_rejected() {
+fn a_winner_burns_their_shares_and_gets_paid() {
     let mut svm = setup();
-    let config = setup_with_config(&mut svm);
-    let creator = funded_keypair(&mut svm, 10 * MARKET_INIT_FEE);
-    let nonce = 21u64;
+    let (m, bettors) = market_with_bets(&mut svm, 30, &[(0, 20 * MARKET_INIT_FEE)], 0);
+    let (bettor, quote_ata) = &bettors[0];
 
-    let (market, _) = market_pda(&creator.pubkey(), nonce);
-    let (vault, _) = vault_pda(&market);
-    let (creator_position, _) = position_pda(&market, &creator.pubkey());
+    let shares_before = token_balance(&svm, &outcome_ata(&m.market, &bettor.pubkey(), 0));
+    let usdc_before = token_balance(&svm, quote_ata);
+    let pool = token_balance(&svm, &m.vault);
+    assert!(shares_before > 0);
 
     send(
         &mut svm,
-        ix_initialize_market(&creator.pubkey(), &market, &vault, &creator_position, nonce, 2, crate::common::FAR_FUTURE_CLOSE, &config),
-        &creator,
+        ix_claim(&m.market, &m.vault, &bettor.pubkey(), quote_ata, 0),
+        bettor,
         &[],
     )
-    .expect("initialize_market should succeed");
+    .expect("claim should succeed");
 
-    // Market is still Open — nobody has settled it yet.
-    let result = send(&mut svm, ix_claim(&market, &vault, &creator_position, &creator.pubkey()), &creator, &[]);
-    assert!(result.is_err(), "claim must be rejected before the market is Settled");
+    let usdc_after = token_balance(&svm, quote_ata);
 
-    let position_account = svm.get_account(&creator_position).expect("position should still exist");
-    let position_state: &Position = from_bytes(&position_account.data);
-    assert_eq!(position_state.claimed, 0, "a rejected claim must not mark the position claimed");
+    println!();
+    println!("pool at settlement: {}", usd(pool));
+    println!("bettor held:        {} winning shares", sh(shares_before));
+    println!("after claiming:");
+    println!(
+        "  shares:  {} (burned)",
+        sh(token_balance(
+            &svm,
+            &outcome_ata(&m.market, &bettor.pubkey(), 0)
+        ))
+    );
+    println!(
+        "  USDC:    {} -> {}  (paid {})",
+        usd(usdc_before),
+        usd(usdc_after),
+        usd(usdc_after - usdc_before)
+    );
+    println!("  vault:   {}", usd(token_balance(&svm, &m.vault)));
+    println!();
+
+    assert_eq!(
+        token_balance(&svm, &outcome_ata(&m.market, &bettor.pubkey(), 0)),
+        0,
+        "winning shares must be burned"
+    );
+    assert!(usdc_after > usdc_before, "a winner must be paid");
 }
 
+// Burning is what makes claiming once-only: the second attempt finds a zero
+// balance and stops. No separate `claimed` flag to get out of step.
 #[test]
 fn claiming_twice_is_rejected() {
     let mut svm = setup();
-    let config = setup_with_config(&mut svm);
-    let creator = funded_keypair(&mut svm, 10 * MARKET_INIT_FEE);
-    let nonce = 22u64;
+    let (m, bettors) = market_with_bets(&mut svm, 31, &[(0, 20 * MARKET_INIT_FEE)], 0);
+    let (bettor, quote_ata) = &bettors[0];
 
-    let (market, _) = market_pda(&creator.pubkey(), nonce);
-    let (vault, _) = vault_pda(&market);
-    let (creator_position, _) = position_pda(&market, &creator.pubkey());
-
-    let bet_close_ts = current_clock_ts(&svm) + 60;
     send(
         &mut svm,
-        ix_initialize_market(&creator.pubkey(), &market, &vault, &creator_position, nonce, 2, bet_close_ts, &config),
-        &creator,
+        ix_claim(&m.market, &m.vault, &bettor.pubkey(), quote_ata, 0),
+        bettor,
         &[],
     )
-    .expect("initialize_market should succeed");
+    .expect("first claim");
 
-    advance_clock_past(&mut svm, bet_close_ts);
-    let authority = authority_keypair();
-    send(&mut svm, ix_settle_market(&market, &vault, &authority.pubkey(), 0), &creator, &[&authority])
-        .expect("settle_market should succeed");
+    let after_first = token_balance(&svm, quote_ata);
 
-    send(&mut svm, ix_claim(&market, &vault, &creator_position, &creator.pubkey()), &creator, &[])
-        .expect("first claim should succeed");
+    let result = send(
+        &mut svm,
+        ix_claim(&m.market, &m.vault, &bettor.pubkey(), quote_ata, 0),
+        bettor,
+        &[],
+    );
 
-    // Position is closed after the first claim, so a second attempt has
-    // nothing to read — proving the same thing (can't be paid twice) from
-    // a different angle than a livesvm-account-still-exists check would.
+    println!();
+    println!("first claim:  accepted, paid out");
+    println!(
+        "second claim: {}",
+        if result.is_err() {
+            "rejected (no shares left to burn)"
+        } else {
+            "ACCEPTED (bug)"
+        }
+    );
+    println!(
+        "balance unchanged: {}",
+        token_balance(&svm, quote_ata) == after_first
+    );
+    println!();
+
+    assert!(result.is_err(), "a second claim must be rejected");
+}
+
+// Nobody gets paid before the result is in. Until then the pool has no owner.
+#[test]
+fn claiming_before_settlement_is_rejected() {
+    let mut svm = setup();
+    let m = open_market_default(&mut svm, 32);
+
+    let (bettor, quote_ata) = funded_bettor(&mut svm, 50 * MARKET_INIT_FEE);
+    send(
+        &mut svm,
+        ix_place_bet(
+            &m.market,
+            &m.vault,
+            &bettor.pubkey(),
+            &quote_ata,
+            0,
+            10 * MARKET_INIT_FEE,
+            &m.config,
+        ),
+        &bettor,
+        &[],
+    )
+    .expect("bet");
+
+    let result = send(
+        &mut svm,
+        ix_claim(&m.market, &m.vault, &bettor.pubkey(), &quote_ata, 0),
+        &bettor,
+        &[],
+    );
+
+    println!();
+    println!(
+        "market not yet settled; claim -> {}",
+        if result.is_err() {
+            "rejected"
+        } else {
+            "ACCEPTED (bug)"
+        }
+    );
+    println!();
+
     assert!(
-        svm.get_account(&creator_position).is_none(),
-        "position should already be gone before any second claim attempt"
+        result.is_err(),
+        "claiming an unsettled market must be rejected"
+    );
+}
+
+// The losing side's tokens are worthless. A loser holds none of the winning
+// mint, so there's nothing to burn and the claim fails outright rather than
+// quietly paying zero and leaving them thinking it worked.
+#[test]
+fn a_loser_gets_nothing() {
+    let mut svm = setup();
+    let (m, bettors) = market_with_bets(
+        &mut svm,
+        33,
+        &[(0, 20 * MARKET_INIT_FEE), (1, 20 * MARKET_INIT_FEE)],
+        0, // outcome 0 wins, so bettor 1 lost
+    );
+    let (loser, loser_quote) = &bettors[1];
+
+    let before = token_balance(&svm, loser_quote);
+    let losing_shares = token_balance(&svm, &outcome_ata(&m.market, &loser.pubkey(), 1));
+    let winning_shares = token_balance(&svm, &outcome_ata(&m.market, &loser.pubkey(), 0));
+
+    let result = send(
+        &mut svm,
+        ix_claim(&m.market, &m.vault, &loser.pubkey(), loser_quote, 0),
+        loser,
+        &[],
+    );
+
+    println!();
+    println!("winning outcome was 0");
+    println!(
+        "loser holds {} shares of outcome 1 (worthless)",
+        sh(losing_shares)
+    );
+    println!(
+        "loser holds {} shares of outcome 0 (the winner)",
+        sh(winning_shares)
+    );
+    println!(
+        "claim -> {}",
+        if result.is_err() {
+            "rejected, nothing to burn"
+        } else {
+            "ACCEPTED (bug)"
+        }
+    );
+    println!(
+        "USDC unchanged: {}",
+        token_balance(&svm, loser_quote) == before
+    );
+    println!();
+
+    assert!(result.is_err(), "a loser has no winning shares to claim");
+    assert_eq!(
+        token_balance(&svm, loser_quote),
+        before,
+        "a loser's balance must not change"
+    );
+}
+
+// The bug this guards against: each claim burns tokens, so the winning mint's
+// supply shrinks as people cash in. If the payout divided by the LIVE supply
+// instead of the snapshot taken at settlement, each successive claimer would
+// get a bigger slice than the last until the vault ran dry.
+//
+// Three winners of different sizes, claiming one after another - the value per
+// share must come out identical for all of them.
+#[test]
+fn every_winner_gets_the_same_value_per_share() {
+    let mut svm = setup();
+    let (m, bettors) = market_with_bets(
+        &mut svm,
+        34,
+        &[
+            (0, 10 * MARKET_INIT_FEE),
+            (0, 25 * MARKET_INIT_FEE),
+            (0, 40 * MARKET_INIT_FEE),
+            (1, 30 * MARKET_INIT_FEE), // a loser, so the pool has real money in it
+        ],
+        0,
+    );
+
+    let pool = token_balance(&svm, &m.vault);
+    println!();
+    println!("pool at settlement: {}", usd(pool));
+    println!("three winners claiming in sequence:");
+
+    let mut per_share_values = Vec::new();
+
+    for (i, (bettor, quote_ata)) in bettors.iter().take(3).enumerate() {
+        let shares = token_balance(&svm, &outcome_ata(&m.market, &bettor.pubkey(), 0));
+        let before = token_balance(&svm, quote_ata);
+
+        send(
+            &mut svm,
+            ix_claim(&m.market, &m.vault, &bettor.pubkey(), quote_ata, 0),
+            bettor,
+            &[],
+        )
+        .unwrap_or_else(|e| panic!("claim {i} should succeed: {e:?}"));
+
+        let paid = token_balance(&svm, quote_ata) - before;
+        assert!(paid > 0, "winner {i} should be paid");
+
+        // Scaled so integer division doesn't hide small differences.
+        let per_share = (paid as u128) * 1_000_000 / (shares as u128);
+        println!(
+            "  winner {}: {} shares -> {}   ({:.6} per share, vault left {})",
+            i + 1,
+            sh(shares),
+            usd(paid),
+            per_share as f64 / 1e6,
+            usd(token_balance(&svm, &m.vault))
+        );
+        per_share_values.push(per_share);
+    }
+    println!();
+
+    let first = per_share_values[0];
+    for (i, v) in per_share_values.iter().enumerate() {
+        let diff = if *v > first { v - first } else { first - v };
+        assert!(
+            diff <= 1,
+            "claimer {i} got a different value per share ({v} vs {first}) - \
+             the payout is dividing by live supply instead of the settlement snapshot"
+        );
+    }
+}
+
+// The solvency invariant, end to end: whatever the winners take out together
+// can never be more than what everyone put in. Floor division means the total
+// lands slightly under, leaving dust - the safe direction to be wrong in.
+#[test]
+fn payouts_never_exceed_the_pool() {
+    let mut svm = setup();
+    let (m, bettors) = market_with_bets(
+        &mut svm,
+        35,
+        &[
+            (0, 7 * MARKET_INIT_FEE),
+            (1, 13 * MARKET_INIT_FEE),
+            (0, 3 * MARKET_INIT_FEE),
+            (1, 21 * MARKET_INIT_FEE),
+            (0, 11 * MARKET_INIT_FEE),
+        ],
+        0,
+    );
+
+    let pool = token_balance(&svm, &m.vault);
+    let mut paid_out = 0u64;
+
+    println!();
+    println!("pool at settlement: {}", usd(pool));
+
+    // The creator holds seed shares on the winning side too, so they claim
+    // alongside everyone else.
+    let mut claimers: Vec<(&Keypair, &Pubkey)> = vec![(&m.creator, &m.creator_quote_ata)];
+    for (kp, ata) in &bettors {
+        claimers.push((kp, ata));
+    }
+
+    for (n, (kp, quote_ata)) in claimers.into_iter().enumerate() {
+        if token_balance(&svm, &outcome_ata(&m.market, &kp.pubkey(), 0)) == 0 {
+            println!("  {n}: no winning shares, skipped");
+            continue;
+        }
+        let before = token_balance(&svm, quote_ata);
+        send(
+            &mut svm,
+            ix_claim(&m.market, &m.vault, &kp.pubkey(), quote_ata, 0),
+            kp,
+            &[],
+        )
+        .unwrap_or_else(|e| panic!("claim for {} should succeed: {e:?}", kp.pubkey()));
+        let paid = token_balance(&svm, quote_ata) - before;
+        paid_out += paid;
+        println!("  {n}: claimed {}", usd(paid));
+    }
+
+    let dust = pool - paid_out;
+    println!("total paid out: {}", usd(paid_out));
+    println!("dust remaining: {dust} base units ({})", usd(dust));
+    println!();
+
+    assert!(
+        paid_out <= pool,
+        "paid out {paid_out} from a pool of {pool} - the vault promised more than it held"
+    );
+    assert!(
+        dust < 100,
+        "dust of {dust} is too large - rounding should leave only a few units"
+    );
+    assert_eq!(
+        token_balance(&svm, &m.vault),
+        dust,
+        "whatever wasn't paid out must still be sitting in the vault"
     );
 }

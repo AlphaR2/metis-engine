@@ -10,13 +10,13 @@ use sha2::{Digest, Sha256};
 // Anchor client / Codama SDK can derive the same bytes independently
 // just from knowing the account or instruction name.
 fn discriminator(preimage: &str) -> [u8; 8] {
-    let hash = Sha256::digest(preimage.as_bytes()); 
+    let hash = Sha256::digest(preimage.as_bytes());
     hash[0..8].try_into().unwrap()
 }
 
 fn main() {
     // add more when you add more accounts or instructions, and paste the output into discriminator.rs
-    
+
     println!("// ── Account discriminators ──────────────────────────────────────────");
     println!(
         "pub const MARKET_DISCRIMINATOR:   [u8; 8] = {:?};",

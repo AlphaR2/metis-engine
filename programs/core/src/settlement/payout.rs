@@ -1,13 +1,14 @@
-
-/// The vault's expected lamport balance right before settlement: rent-exempt
-/// minimum plus every deposit ever collected. Only ever exactly true at that
-/// one moment 
-pub fn expected_vault_balance(rent_minimum: u64, total_collected: u64) -> Option<u64> {
-    rent_minimum.checked_add(total_collected)
-}
+// expected_vault_balance used to live here, adding the rent-exempt minimum to
+// total_collected. It's gone: the vault is now an SPL token account, so its
+// rent is paid in SOL and sits outside the token balance. The solvency check
+// in settle_market is just "amount >= total_collected", no rent term needed.
 
 /// payout = my winning shares * total collected / all winning shares.
-/// Zero if this position never held the winning side. Floor division,
+///
+/// Every winning share is worth the same slice of the pool, no matter what
+/// anyone paid to get it. Floor division, so the pool can only ever be
+/// short-changed in its own favour - a few units of dust stay behind rather
+/// than the vault promising more than it holds.
 pub fn compute_payout(winning_shares: u64, total_collected: u64, all_winning_shares: u64) -> u64 {
     if all_winning_shares == 0 || winning_shares == 0 {
         return 0;
@@ -15,72 +16,97 @@ pub fn compute_payout(winning_shares: u64, total_collected: u64, all_winning_sha
     ((winning_shares as u128) * (total_collected as u128) / (all_winning_shares as u128)) as u64
 }
 
+// Tests for the pari-mutuel payout. To see the printed output:
+//   cargo test -p openstake-core --lib settlement::payout -- --nocapture
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    #[test]
-    fn expected_vault_balance_adds_rent_and_collected() {
-        assert_eq!(expected_vault_balance(1_000, 500_000), Some(501_000));
-    }
-
-    #[test]
-    fn expected_vault_balance_none_on_overflow() {
-        assert_eq!(expected_vault_balance(u64::MAX, 1), None);
-    }
-
+    // The basic promise: hold 3 of the 10 winning shares, get 3/10 of the pool.
+    // Nothing about what anyone paid enters into it.
     #[test]
     fn compute_payout_splits_proportionally() {
-        // 3 winning shares out of 10 total, $100 collected -> $30.
-        assert_eq!(compute_payout(3, 100, 10), 30);
+        let payout = compute_payout(3, 100, 10);
+        println!("3 of 10 winning shares, pool 100 -> payout {payout}");
+        assert_eq!(payout, 30);
     }
 
+    // Holding none of the winning side pays nothing. This is the losing
+    // bettor's path, and it must be exactly zero, not a rounding artefact.
     #[test]
     fn compute_payout_zero_when_no_winning_shares() {
-        assert_eq!(compute_payout(0, 1_000, 500), 0);
+        let payout = compute_payout(0, 1_000, 500);
+        println!("0 winning shares, pool 1000 -> payout {payout}");
+        assert_eq!(payout, 0);
     }
 
+    // Shouldn't be reachable in practice, since the creator always seeds every
+    // side. But an empty winning side would be a divide-by-zero, so it has to
+    // return 0 rather than panic and take the whole instruction down.
     #[test]
     fn compute_payout_zero_when_pool_had_no_winners() {
-        // Shouldn't happen in practice (creator always seeds both sides), but
-        // must not panic/divide-by-zero if it ever does.
-        assert_eq!(compute_payout(5, 1_000, 0), 0);
+        let payout = compute_payout(5, 1_000, 0);
+        println!("5 shares but the winning side is empty -> payout {payout} (no divide-by-zero)");
+        assert_eq!(payout, 0);
     }
 
+    // Real market-sized numbers: no overflow, and it rounds down rather than
+    // promising more than the pool holds.
     #[test]
     fn compute_payout_floors_and_never_overflows_at_scale() {
-        // Realistic large-market numbers: doesn't overflow, and rounds down
-        // rather than panicking or rounding up past what the pool holds.
         let winning_shares = 253_488_139u64;
         let all_winning_shares = 255_624_212u64;
-        let total_collected = 360_000_000u64; // $360.00 in 1e6 base units
+        let total_collected = 360_000_000u64; // $360.00 in millionths
 
         let payout = compute_payout(winning_shares, total_collected, all_winning_shares);
-        assert!(payout <= total_collected, "a single payout can never exceed the whole pool");
+        println!(
+            "holding {:.2} of {:.2} winning shares, pool ${:.2} -> payout ${:.2}",
+            winning_shares as f64 / 1e6,
+            all_winning_shares as f64 / 1e6,
+            total_collected as f64 / 1e6,
+            payout as f64 / 1e6
+        );
+
+        assert!(
+            payout <= total_collected,
+            "a single payout can never exceed the whole pool"
+        );
         assert!(payout > 0);
     }
 
+    // The invariant the whole design rests on: add up what every winner takes
+    // and it can never come to more than what went in. Rounding down means the
+    // total lands slightly UNDER, leaving dust behind - which is the safe
+    // direction to be wrong in.
     #[test]
     fn compute_payout_sums_to_at_most_total_collected_across_many_winners() {
-        // Floor division means the sum of every winner's payout is <=
-        // total_collected, never more (the "dust stays in the pool" invariant).
         let all_winning_shares = 1_000u64;
         let total_collected = 999_999u64; // deliberately not evenly divisible
         let per_winner_shares = 37u64; // doesn't divide 1000 evenly either
 
         let mut distributed = 0u128;
         let mut remaining_shares = all_winning_shares;
+        let mut claims = 0;
         while remaining_shares > 0 {
             let shares = per_winner_shares.min(remaining_shares);
             distributed += compute_payout(shares, total_collected, all_winning_shares) as u128;
             remaining_shares -= shares;
+            claims += 1;
         }
+
+        println!("{claims} winners splitting a pool of {total_collected}");
+        println!("  paid out: {distributed}");
+        println!(
+            "  dust left behind: {}",
+            total_collected as u128 - distributed
+        );
 
         assert!(distributed <= total_collected as u128);
     }
 
-    // --- proptest: the one invariant that actually matters, randomized ---
+    // Same invariant, randomised. Proptest prints nothing when it passes - if
+    // it fails it prints the exact inputs that broke it, which is the point.
     proptest! {
         #[test]
         fn compute_payout_never_exceeds_total_collected_random(
@@ -88,10 +114,9 @@ mod tests {
             all_winning_shares in 0u64..1_000_000_000_000,
             total_collected in 0u64..1_000_000_000_000,
         ) {
-            // winning_shares can't validly exceed all_winning_shares in real
-            // usage (a position's own shares are always <= the pool total) —
-            // constrain the generated inputs to that real invariant instead of
-            // asserting on nonsensical combinations.
+            // A position can't hold more winning shares than exist, so constrain
+            // the generated inputs to that real-world invariant rather than
+            // asserting things about impossible states.
             prop_assume!(winning_shares <= all_winning_shares);
 
             let payout = compute_payout(winning_shares, total_collected, all_winning_shares);

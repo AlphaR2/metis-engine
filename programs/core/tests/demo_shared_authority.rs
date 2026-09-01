@@ -1,80 +1,55 @@
 mod common;
-// Demonstration: two markets, two different creators (standing in for two
-// different SDK providers), same authority. Proves the "one keypair settles
-// everything, for every provider" claim with a real read instead of prose.
+// Two markets, two unrelated creators, one settlement authority. Proves the
+// "one keypair settles everything, for every provider" claim with a real read
+// rather than prose - and shows why replacing it with a quorum matters.
 //
 // Run with:
-//   cargo test demo_shared_authority -- --nocapture
+//   cargo test --test demo_shared_authority -- --nocapture
 
 use bytemuck::from_bytes;
 use solana_sdk::signature::Signer;
 
-use crate::common::{funded_keypair, ix_initialize_market, market_pda, position_pda, send, setup, setup_with_config, vault_pda, FAR_FUTURE_CLOSE};
-use openstake_core::{constants::MARKET_INIT_FEE, amm::state::Market};
+use crate::common::*;
+use openstake_core::amm::state::Market;
 
 #[test]
-fn two_unrelated_creators_get_the_exact_same_settlement_authority() {
+fn unrelated_creators_get_the_same_settlement_authority() {
     let mut svm = setup();
     let config = setup_with_config(&mut svm);
+    let close_ts = default_close_ts(&svm);
 
-    // Stand-in for "Provider A's sports-betting frontend" creating a market
-    // on a user's behalf.
-    let provider_a_creator = funded_keypair(&mut svm, 10 * MARKET_INIT_FEE);
-    let nonce_a = 501u64;
-    let (market_a, _) = market_pda(&provider_a_creator.pubkey(), nonce_a);
-    let (vault_a, _) = vault_pda(&market_a);
-    let (position_a, _) = position_pda(&market_a, &provider_a_creator.pubkey());
-    send(
-        &mut svm,
-        ix_initialize_market(&provider_a_creator.pubkey(), &market_a, &vault_a, &position_a, nonce_a, 2, FAR_FUTURE_CLOSE, &config),
-        &provider_a_creator,
-        &[],
-    )
-    .expect("provider A's market should initialize");
+    // Stand-in for two different frontends creating markets on their users'
+    // behalf. Nothing links them except the program itself.
+    let a = open_market_with_config(&mut svm, 501, close_ts, config);
+    let b = open_market_with_config(&mut svm, 777, close_ts, config);
 
-    // Stand-in for "Provider B's election-prediction frontend" — a totally
-    // different creator, different market, nothing in common with A except
-    // that both went through the same Openstake program.
-    let provider_b_creator = funded_keypair(&mut svm, 10 * MARKET_INIT_FEE);
-    let nonce_b = 777u64;
-    let (market_b, _) = market_pda(&provider_b_creator.pubkey(), nonce_b);
-    let (vault_b, _) = vault_pda(&market_b);
-    let (position_b, _) = position_pda(&market_b, &provider_b_creator.pubkey());
-    send(
-        &mut svm,
-        ix_initialize_market(&provider_b_creator.pubkey(), &market_b, &vault_b, &position_b, nonce_b, 2, FAR_FUTURE_CLOSE, &config),
-        &provider_b_creator,
-        &[],
-    )
-    .expect("provider B's market should initialize");
-
-    let market_a_account = svm.get_account(&market_a).unwrap();
-    let market_a_state: &Market = from_bytes(&market_a_account.data);
-    let market_b_account = svm.get_account(&market_b).unwrap();
-    let market_b_state: &Market = from_bytes(&market_b_account.data);
+    let a_account = svm.get_account(&a.market).unwrap();
+    let a_state: &Market = from_bytes(&a_account.data);
+    let b_account = svm.get_account(&b.market).unwrap();
+    let b_state: &Market = from_bytes(&b_account.data);
 
     println!();
-    println!("Provider A's creator:  {}", provider_a_creator.pubkey());
-    println!("Provider A's market:   {market_a}");
-    println!("Provider A's authority: {}", market_a_state.authority);
+    println!("provider A creator:   {}", a.creator.pubkey());
+    println!("provider A market:    {}", a.market);
+    println!("provider A authority: {}", a_state.authority);
     println!();
-    println!("Provider B's creator:  {}", provider_b_creator.pubkey());
-    println!("Provider B's market:   {market_b}");
-    println!("Provider B's authority: {}", market_b_state.authority);
+    println!("provider B creator:   {}", b.creator.pubkey());
+    println!("provider B market:    {}", b.market);
+    println!("provider B authority: {}", b_state.authority);
     println!();
     println!(
-        "same authority despite unrelated creators/markets? {}",
-        market_a_state.authority == market_b_state.authority
+        "same authority despite unrelated creators? {}",
+        a_state.authority == b_state.authority
     );
     println!(
-        "compile-time constant they both got: {}",
+        "the compile-time constant they both got: {}",
         openstake_core::constants::AUTHORITY
     );
     println!();
 
     assert_eq!(
-        market_a_state.authority, market_b_state.authority,
-        "today, every market from every creator gets the exact same hardcoded authority"
+        a_state.authority, b_state.authority,
+        "today every market from every creator gets the same hardcoded authority"
     );
-    assert_eq!(market_a_state.authority, openstake_core::constants::AUTHORITY);
+    assert_eq!(a_state.authority, openstake_core::constants::AUTHORITY);
 }

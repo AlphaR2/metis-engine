@@ -1,14 +1,14 @@
-use bytemuck::{bytes_of, from_bytes, Pod, Zeroable};
+use bytemuck::{Pod, Zeroable, bytes_of, from_bytes};
 use pinocchio::{
+    AccountView, Address, ProgramResult,
     cpi::{Seed, Signer},
     error::ProgramError,
-    sysvars::{rent::Rent, Sysvar},
-    AccountView, Address, ProgramResult,
+    sysvars::{Sysvar, rent::Rent},
 };
 use pinocchio_system::instructions::CreateAccount;
 
 use crate::{
-    config::state::{Config, CONFIG_DISCRIMINATOR},
+    config::state::{CONFIG_DISCRIMINATOR, Config},
     constants::{CONFIG_SEED, INITIAL_CONFIG_ADMIN},
     validation,
 };
@@ -21,6 +21,7 @@ pub struct InitializeConfigArgs {
     pub slippage_limit_bps: u16,
     pub max_in_bps_of_vault: u16,
     pub admin: Address,
+    pub quote_mint: Address,
     pub max_outcomes: u8,
     pub _padding: [u8; 1],
 }
@@ -36,13 +37,9 @@ impl InitializeConfigArgs {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<InitializeConfigArgs>() == 48);
+const _: () = assert!(core::mem::size_of::<InitializeConfigArgs>() == 80);
 
-
-pub fn process_initialize_config(
-    accounts: &mut [AccountView], 
-    data: &[u8]) 
-    -> ProgramResult {
+pub fn process_initialize_config(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let args = InitializeConfigArgs::load(data)?;
 
     let [authority, system_program, config] = accounts else {
@@ -63,6 +60,12 @@ pub fn process_initialize_config(
         || args.slippage_limit_bps as u32 > 10_000
         || args.max_in_bps_of_vault as u32 > 10_000
     {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
+    // A zeroed quote mint would make every future initialize_market fail,
+    // since markets must match Config.quote_mint and no real mint is zero.
+    if args.quote_mint == Address::default() {
         return Err(ProgramError::InvalidInstructionData);
     }
 
@@ -95,11 +98,14 @@ pub fn process_initialize_config(
         slippage_limit_bps: args.slippage_limit_bps,
         max_in_bps_of_vault: args.max_in_bps_of_vault,
         admin: args.admin,
+        quote_mint: args.quote_mint,
         discriminator: CONFIG_DISCRIMINATOR,
         max_outcomes: args.max_outcomes,
         bump: config_bump,
     };
-    config.try_borrow_mut()?.copy_from_slice(bytes_of(&config_state));
+    config
+        .try_borrow_mut()?
+        .copy_from_slice(bytes_of(&config_state));
 
     Ok(())
 }

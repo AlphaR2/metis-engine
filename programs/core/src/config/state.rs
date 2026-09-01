@@ -23,18 +23,25 @@ pub struct Config {
     /// TODO(squads-multisig)
     /// not started.
     pub admin: Address,
+    /// The stablecoin every NEW market must be denominated in (USDC).
+    ///
+    /// Markets snapshot this into `Market.quote_mint` at creation and stay
+    /// bound to it for life — a token account's mint is immutable once
+    /// initialized, so changing this only affects markets created afterwards.
+    /// Live markets keep whatever they opened with.
+    pub quote_mint: Address,
     pub discriminator: [u8; 8],
     pub max_outcomes: u8,
     pub bump: u8,
 }
 
-const _: () = assert!(core::mem::size_of::<Config>() == 56);
+const _: () = assert!(core::mem::size_of::<Config>() == 88);
 const _: () = assert!(core::mem::align_of::<Config>() == 8);
 
-// ── Discriminators owned by this part 
+// ── Discriminators owned by this part
 // Do not hand-edit. Regenerate with `cargo run --bin compute-discriminators`
 // if a struct is renamed or a new account/instruction is added.
 
 pub const CONFIG_DISCRIMINATOR: [u8; 8] = [155, 12, 170, 224, 30, 250, 204, 130];
-pub const INITIALIZE_CONFIG:    [u8; 8] = [208, 127, 21, 1, 194, 190, 196, 70];
-pub const UPDATE_CONFIG:        [u8; 8] = [29, 158, 252, 191, 10, 83, 219, 99];
+pub const INITIALIZE_CONFIG: [u8; 8] = [208, 127, 21, 1, 194, 190, 196, 70];
+pub const UPDATE_CONFIG: [u8; 8] = [29, 158, 252, 191, 10, 83, 219, 99];

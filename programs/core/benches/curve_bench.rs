@@ -1,9 +1,11 @@
-// Pure wall-clock benchmark of the curve math — no VM, no CU accounting
-// (that lives in tests/ against the real assembled program). This just
-// tells you whether the math itself is getting cheaper or more expensive
-// as it evolves.
+// Pure wall-clock benchmark of the curve math — no VM, no CU accounting.
+// This just tells you whether the math itself is getting cheaper or more
+// expensive as it evolves. Actual compute-unit cost against the real
+// assembled program isn't measured anywhere yet — that would need a
+// litesvm test reading CU consumption from the transaction result, not
+// benches like this one.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use openstake_core::amm::curve::{buy_shares, isqrt, symmetric_seed};
 
 fn bench_isqrt(c: &mut Criterion) {

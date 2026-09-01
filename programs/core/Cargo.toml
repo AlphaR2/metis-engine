@@ -18,7 +18,9 @@ harness = false
 [dependencies]
 bytemuck = { version = "1.25.2", features = ["derive"] }
 pinocchio = "0.11.2"
+pinocchio-associated-token-account = "0.4.0"
 pinocchio-system = "0.6.1"
+pinocchio-token = "0.7.0"
 solana-address = { version = "2.6.1", features = ["bytemuck", "decode"] }
 
 [dev-dependencies]

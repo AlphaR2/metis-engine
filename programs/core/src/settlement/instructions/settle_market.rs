@@ -1,18 +1,16 @@
 //  TODO: Oracle work will be added here to make sure this is complete settlement
 
-
-use bytemuck::{from_bytes, from_bytes_mut, Pod, Zeroable};
+use bytemuck::{Pod, Zeroable, from_bytes, from_bytes_mut};
 use pinocchio::{
-    error::ProgramError,
-    sysvars::{clock::Clock, rent::Rent, Sysvar},
     AccountView, ProgramResult,
+    error::ProgramError,
+    sysvars::{Sysvar, clock::Clock},
 };
+use pinocchio_token::state::Account;
 
 use crate::{
-    amm::state::{Market, MarketStatus, MARKET_DISCRIMINATOR},
+    amm::state::{MARKET_DISCRIMINATOR, Market, MarketStatus},
     error::OpenStakeError,
-    settlement::payout::expected_vault_balance,
-    settlement::state::{Vault, VAULT_DISCRIMINATOR},
     validation,
 };
 
@@ -36,7 +34,14 @@ impl SettleMarketArgs {
 
 const _: () = assert!(core::mem::size_of::<SettleMarketArgs>() == 8);
 
-
+/// Accounts:
+///   0 market    (writable)
+///   1 vault     (the market's USDC account, read only here)
+///   2 authority (signer)
+///
+/// Records which outcome actually happened. No pricing runs here - the curve
+/// is finished by this point and never looked at again. All this does is write
+/// down the winner so claims can start.
 pub fn process_settle_market(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let args = SettleMarketArgs::load(data)?;
 
@@ -47,10 +52,6 @@ pub fn process_settle_market(accounts: &mut [AccountView], data: &[u8]) -> Progr
     validation::require_signer(authority)?;
     validation::require_writable(market)?;
     validation::require_initialized_and_owned(market, &crate::ID, false)?;
-    validation::require_initialized_and_owned(vault, &crate::ID, false)?;
-
-    
-    let market_address = *market.address();
 
     let mut market_data = market.try_borrow_mut()?;
     let market_state: &mut Market = from_bytes_mut(&mut market_data);
@@ -61,7 +62,6 @@ pub fn process_settle_market(accounts: &mut [AccountView], data: &[u8]) -> Progr
     // TODO(single-point-of-failure): this single-signer check is the part
     // planned to be replaced by an oracle system
     // for now use authority
-
     validation::require_addresses_match(authority.address(), &market_state.authority)?;
 
     // Covers Uninitialized and already-Settled in one check.
@@ -72,25 +72,30 @@ pub fn process_settle_market(accounts: &mut [AccountView], data: &[u8]) -> Progr
         return Err(OpenStakeError::InvalidOutcome.into());
     }
 
-    // Betting must actually be closed before the market can settle
+    // The event must have started before anyone can say who won. bet_close_ts
+    // is kickoff, and settling is only honest once there's a result to report.
     let now = Clock::get()?.unix_timestamp;
     if now < market_state.bet_close_ts {
         return Err(OpenStakeError::MarketClosed.into());
     }
 
-    // Vault solvency check, not an exact-balance check
+    // Solvency: the vault must still hold everything that was ever paid in,
+    // otherwise the payouts we're about to allow can't all be honoured.
+    //
+    // A ">=" not an "==". Anyone can send tokens to any account, so an
+    // unexpected extra dollar landing in the vault must not brick the market
+    // forever - there'd be no way to recover, since money only leaves through
+    // claim, and claim needs the market Settled first.
+    //
+    // Note there's no rent term here. The vault is an SPL token account: its
+    // rent is paid in SOL and sits outside the token balance, so the amount we
+    // read is pure USDC.
     {
-        let vault_data = vault.try_borrow()?;
-        let vault_state: &Vault = from_bytes(&vault_data);
-        validation::require_discriminator(vault_state.discriminator, VAULT_DISCRIMINATOR)?;
-        validation::require_addresses_match(&vault_state.market, &market_address)?;
+        let vault_state = Account::from_account_view(vault)?;
+        validation::require_addresses_match(vault.address(), &market_state.vault)?;
+        validation::require_addresses_match(vault_state.mint(), &market_state.quote_mint)?;
 
-        let rent = Rent::get()?;
-        let rent_minimum = rent.try_minimum_balance(core::mem::size_of::<Vault>())?;
-        let expected = expected_vault_balance(rent_minimum, market_state.total_collected)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
-
-        if vault.lamports() < expected {
+        if vault_state.amount() < market_state.total_collected {
             return Err(OpenStakeError::VaultBalanceMismatch.into());
         }
     }

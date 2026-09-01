@@ -1,74 +1,82 @@
-# Test Plan — V0.1
+# Tests
 
-Build in this order. Each tier depends on the one above it passing.
+## Running
 
-## Tier 0 — unit tests (done)
+```bash
+cargo build-sbf --manifest-path programs/core/Cargo.toml
+cargo test -p openstake-core -- --nocapture --test-threads=1
+```
 
-`curve.rs`, 8 tests. Pure math, no accounts, no litesvm. Keep adding to
-these whenever the formula changes — cheapest and fastest signal.
+The build must run first — the litesvm tests load the compiled program from
+`target/deploy/openstake_core.so`. `--test-threads=1` matters: without it,
+output from parallel tests interleaves and becomes unreadable, since most
+tests print the numbers they're asserting on.
 
-## Tier 1 — per-instruction happy path
+Unit tests only (fast, no build needed):
 
-One litesvm test per instruction, proving the basic case works alone.
+```bash
+cargo test -p openstake-core --lib -- --nocapture --test-threads=1
+```
 
-- [ ] `initialize_market` — Market/Vault/creator's Position all exist,
-      correct discriminators, correct seed shares
-- [ ] `place_bet` — first-time bettor (creates Position)
-- [ ] `place_bet` — repeat bettor (tops up existing Position)
-- [ ] `settle_market` — succeeds when called by the real authority
-- [ ] `claim` — winning position, correct payout amount
+One file:
 
-## Tier 2 — per-instruction rejections
+```bash
+cargo test -p openstake-core --test claim -- --nocapture --test-threads=1
+```
 
-One test per check already written in the code. Walk the error list, prove
-each one actually fires.
+Settlement tests need a real keypair for the authority that settles
+markets — set `OPENSTAKE_AUTHORITY_KEYPAIR` to its path, or place it at
+`keys/authority.json` (gitignored; never commit it). It must match
+`constants::AUTHORITY`.
 
-- [ ] Missing/wrong signer on each instruction
-- [ ] Discriminator mismatch (pass a Vault where a Position is expected)
-- [ ] `place_bet` on a market that isn't Open
-- [ ] `settle_market` called by someone who isn't the recorded authority
-- [ ] `settle_market` called twice (already Settled)
-- [ ] `claim` before settlement
-- [ ] `claim` twice on the same position
-- [ ] `claim` from a position that isn't the caller's
-- [ ] `outcome_index` / `winning_outcome` out of bounds
-- [ ] Vault balance mismatch (needs a deliberately corrupted vault to trigger)
+## What's covered
 
-## Tier 3 — full lifecycle scenario
+**Unit tests** (`programs/core/src/**/*.rs`, `#[cfg(test)] mod tests`) — pure
+functions, no accounts, no litesvm. The curve math (`amm/curve.rs`), the
+pari-mutuel payout formula (`settlement/payout.rs`), struct layout
+round-trips, discriminator uniqueness, and the two pure validation checks.
+Cheapest and fastest signal — extend these first whenever a formula changes.
+Every test states its inputs as dialable `let` bindings and prints its
+numbers, so a value can be changed to explore an edge case without editing
+assertions.
 
-The one that proves the system, not just its parts.
+**Integration tests** (`programs/core/tests/*.rs`) — one file per instruction,
+run against the real compiled program in litesvm:
 
-- [ ] `initialize_market` → several `place_bet` (mixed sides, mixed sizes)
-      → `settle_market` → every winner calls `claim` → assert the vault's
-      final balance is exactly the rent-exempt minimum, nothing more,
-      nothing less
+| File | Covers |
+|---|---|
+| `initialize_market.rs` | accounts created, mint decimals, creator receives seed shares, stake leaves their wallet, kickoff-too-soon rejected, single-outcome rejected |
+| `place_bet.rs` | tokens minted match the curve, mint supply tracks the curve, top-ups, hedging both sides, slippage demonstrated, post-close rejected, zero/dust deposits rejected, `max_in_bps_of_vault` cap |
+| `settle_market.rs` | authority gate, before-kickoff rejected, double-settle rejected, out-of-range outcome rejected, vault surplus tolerated, insolvent vault blocked |
+| `claim.rs` | burn + payout, double-claim rejected, pre-settlement rejected, losers get nothing, every winner gets identical value per share, payouts never exceed the pool |
+| `initialize_config.rs` / `update_config.rs` | admin gates, admin rotation, bps bounds, zeroed admin/mint rejected |
+| `scenario_bulk_bettors.rs` | 35 bettors, printed price/slippage table |
+| `scenario_bulk_solvency.rs` | 35 bettors end-to-end (bet → settle → claim), money conserved, dust bounded |
+| `demo_shared_authority.rs` | two unrelated creators share the same hardcoded settlement authority — documents the single-point-of-failure tracked as a TODO |
 
-This is the on-chain version of the design doc's solvency proof.
+The test most worth reading first if you're checking correctness rather than
+just running the suite: `claim::every_winner_gets_the_same_value_per_share`.
+It guards the one bug in this design that would be easy to introduce and hard
+to notice — payout dividing by live mint supply instead of the settlement
+snapshot, which would silently pay later claimers more than earlier ones
+until the vault ran dry.
 
-## Tier 4 — randomized solvency test
+## Not yet covered
 
-Not built yet — was in the original plan, never landed.
+- Secondary market / CLOB — not built.
+- Oracle-driven settlement — `settle_market` is a single-signer authority
+  today (see the TODO in `settlement/instructions/settle_market.rs`).
+- `n > 2` outcomes — `MAX_OUTCOMES` is currently `2`; nothing exercises a
+  bigger value yet.
+- Token-2022 / transfer-hook enforcement of the post-deadline trading freeze —
+  standard SPL Token can freeze one account at a time, not a whole mint; see
+  `docs/MVP_PLAN.md` for the reasoning.
 
-- [ ] N random bettors (random side, random amount, random order) from
-      random keypairs, settle on a random winner, everyone claims,
-      assert `sum(payouts) <= total_collected`
-- [ ] Repeat across many seeds
+## Known environment limitation
 
-This is the test that would have caught the sequential-slippage /
-order-dependence finding automatically, instead of by hand-inspection.
-Worth having going forward to catch the next surprise the same way.
-
-## Tier 5 — adversarial / substitution attempts
-
-- [ ] Pass someone else's Market PDA where this bettor's own is expected
-- [ ] Pass a Position belonging to a different bettor
-- [ ] Derive and pass a PDA with a wrong bump
-- [ ] Reuse a nonce (not really an attack — just confirm it derives a
-      different address, no collision)
-
-## Known blocker (not part of this plan — separate fix)
-
-`litesvm = "0.15.2"` in Cargo.toml is the crates.io release with the
-`touched_flags`/`solana-program-runtime` mismatch — none of the tiers
-above can run until that's resolved. Explicitly not fixing this here per
-instruction — fix when encountered.
+`cargo build-sbf` cannot run on this Windows/WSL-UNC-path setup — the
+Solana toolchain installer fails with a symlink-privilege error (Windows
+error 1314). Every integration test in this repo type-checks cleanly here,
+but has not actually been executed from this environment. Run the real build
+and test suite on Linux/macOS, or WSL with a native filesystem path, before
+treating anything beyond the 30 unit tests as verified.

@@ -1,10 +1,13 @@
-use solana_address::{address, Address};
+use solana_address::{Address, address};
 pub const MARKET_SEED: &[u8] = b"market";
 pub const POSITION_SEED: &[u8] = b"position";
 pub const VAULT_SEED: &[u8] = b"vault";
-/// Singleton — one Config account for the whole program, seeded with no
-/// per-market component, unlike the other three.
 pub const CONFIG_SEED: &[u8] = b"config";
+pub const OUTCOME_MINT_SEED: &[u8] = b"outcome_mint";
+
+/// Outcome tokens use the same decimals as the quote mint (USDC = 6), which
+/// is what lets MARKET_INIT_FEE and the curve's share scale line up 1:1.
+pub const QUOTE_DECIMALS: u8 = 6;
 
 // Outcome encoding
 // N is a dial: bump it and every struct below resizes with it.
@@ -16,6 +19,7 @@ pub const OUTCOME_UNRESOLVED: u8 = u8::MAX; // highest u8 value, used as "no win
 // v1: fixed protocol-wide, not creator-chosen. Every market pays the same
 // fee and shares the same authority. Revisit if that ever needs to vary.
 pub const MARKET_INIT_FEE: u64 = 10_000_000; // TODO: confirm unit — see note below
+pub const PRIMARY_WINDOW_SECS: i64 = 5 * 60 * 60; // 5 hours before kickoff --  can be changed.  
 
 // TODO(single-point-of-failure): see the full note on Market.authority in
 // state/market.rs — this constant is the thing planned to go away in favor

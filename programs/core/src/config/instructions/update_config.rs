@@ -1,8 +1,8 @@
-use bytemuck::{from_bytes, from_bytes_mut, Pod, Zeroable};
-use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
+use bytemuck::{Pod, Zeroable, from_bytes, from_bytes_mut};
+use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError};
 
 use crate::{
-    config::state::{Config, CONFIG_DISCRIMINATOR},
+    config::state::{CONFIG_DISCRIMINATOR, Config},
     validation,
 };
 
@@ -16,6 +16,8 @@ pub struct UpdateConfigArgs {
     pub slippage_limit_bps: u16,
     pub max_in_bps_of_vault: u16,
     pub new_admin: Address,
+    /// Only affects markets created after this call.
+    pub quote_mint: Address,
     pub max_outcomes: u8,
     pub _padding: [u8; 1],
 }
@@ -31,8 +33,7 @@ impl UpdateConfigArgs {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<UpdateConfigArgs>() == 48);
-
+const _: () = assert!(core::mem::size_of::<UpdateConfigArgs>() == 80);
 
 pub fn process_update_config(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let args = UpdateConfigArgs::load(data)?;
@@ -48,9 +49,7 @@ pub fn process_update_config(accounts: &mut [AccountView], data: &[u8]) -> Progr
     let config_state: &mut Config = from_bytes_mut(&mut config_data);
 
     validation::require_discriminator(config_state.discriminator, CONFIG_DISCRIMINATOR)?;
-    // Only the config's own recorded admin can update it — not the
-    // bootstrap admin from initialize_config, which is never read again
-    // once Config exists (see the note on constants::INITIAL_CONFIG_ADMIN).
+    // validate admin to update mint
     validation::require_addresses_match(admin.address(), &config_state.admin)?;
 
     if args.fee_bps as u32 > 10_000
@@ -62,12 +61,17 @@ pub fn process_update_config(accounts: &mut [AccountView], data: &[u8]) -> Progr
     if args.new_admin == Address::default() {
         return Err(ProgramError::InvalidInstructionData);
     }
+    // Same reasoning as new_admin: a zeroed quote mint would silently break
+    if args.quote_mint == Address::default() {
+        return Err(ProgramError::InvalidInstructionData);
+    }
 
     config_state.market_init_fee = args.market_init_fee;
     config_state.fee_bps = args.fee_bps;
     config_state.slippage_limit_bps = args.slippage_limit_bps;
     config_state.max_in_bps_of_vault = args.max_in_bps_of_vault;
     config_state.admin = args.new_admin;
+    config_state.quote_mint = args.quote_mint;
     config_state.max_outcomes = args.max_outcomes;
 
     Ok(())

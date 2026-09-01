@@ -1,17 +1,24 @@
-use bytemuck::{bytes_of, from_bytes, Pod, Zeroable};
+use bytemuck::{Pod, Zeroable, from_bytes};
 use pinocchio::{
+    AccountView, Address, ProgramResult,
     cpi::{Seed, Signer},
     error::ProgramError,
-    sysvars::{clock::Clock, rent::Rent, Sysvar},
-    AccountView, Address, ProgramResult,
+    sysvars::{Sysvar, clock::Clock},
 };
-use pinocchio_system::instructions::{CreateAccount, Transfer};
+use pinocchio_associated_token_account::instructions::CreateIdempotent;
+use pinocchio_token::{
+    instructions::{MintTo, TransferChecked},
+    state::Account,
+};
 
 use crate::{
-    config::state::{CONFIG_DISCRIMINATOR, Config},
     amm::curve::{buy_shares, cost},
-    amm::state::{Market, MarketStatus, Position, MARKET_DISCRIMINATOR, POSITION_DISCRIMINATOR},
-    constants::{MAX_OUTCOMES, POSITION_SEED, INITIAL_CONFIG_ADMIN, CONFIG_SEED},
+    amm::state::{MARKET_DISCRIMINATOR, Market, MarketStatus},
+    config::state::{CONFIG_DISCRIMINATOR, Config},
+    constants::{
+        CONFIG_SEED, INITIAL_CONFIG_ADMIN, MARKET_SEED, MAX_OUTCOMES, OUTCOME_MINT_SEED,
+        QUOTE_DECIMALS,
+    },
     error::OpenStakeError,
     validation,
 };
@@ -37,9 +44,25 @@ impl PlaceBetArgs {
 
 const _: () = assert!(core::mem::size_of::<PlaceBetArgs>() == 16);
 
+/// Accounts:
+///   0  market             (writable)
+///   1  vault              (writable, the market's USDC account)
+///   2  bettor             (signer, writable)
+///   3  bettor_quote_ata   (writable, the USDC they're paying from)
+///   4  quote_mint         (the USDC mint)
+///   5  outcome_mint       (writable, only the outcome being bought)
+///   6  bettor_outcome_ata (writable, where their new shares land)
+///   7  config
+///   8  system_program
+///   9  token_program
+///   10 ata_program
+///
+/// Unlike initialize_market this list is fixed regardless of MAX_OUTCOMES - a
+/// bet only ever touches the one outcome being bought.
 pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let args = PlaceBetArgs::load(data)?;
 
+    // Cheap rejections first, before we touch any account.
     if args.outcome_index as usize >= MAX_OUTCOMES {
         return Err(ProgramError::InvalidInstructionData);
     }
@@ -47,24 +70,49 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
         return Err(OpenStakeError::PaymentTooSmall.into());
     }
 
-    let [market, vault, position, bettor, system_program, config] = accounts else {
+    let [
+        market,
+        vault,
+        bettor,
+        bettor_quote_ata,
+        quote_mint,
+        outcome_mint,
+        bettor_outcome_ata,
+        config,
+        system_program,
+        token_program,
+        ata_program,
+    ] = accounts
+    else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
+    // The bettor signs and pays; everything they touch changes.
     validation::require_signer(bettor)?;
     validation::require_writable(bettor)?;
     validation::require_writable(market)?;
     validation::require_writable(vault)?;
-    validation::require_writable(position)?;
+    validation::require_writable(bettor_quote_ata)?;
+    // The mint's supply grows and the bettor's account gets credited.
+    validation::require_writable(outcome_mint)?;
+    validation::require_writable(bettor_outcome_ata)?;
     validation::require_initialized_and_owned(market, &crate::ID, false)?;
-    validation::require_initialized_and_owned(vault, &crate::ID, false)?;
+
+    // Make sure each "program" account really is the program we think it is,
     if system_program.address() != &pinocchio_system::ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    if token_program.address() != &pinocchio_token::ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    if ata_program.address() != &pinocchio_associated_token_account::ID {
         return Err(ProgramError::IncorrectProgramId);
     }
 
     // load in config to get things started
-    let config_seeds: [&[u8]; 2]  = [CONFIG_SEED, INITIAL_CONFIG_ADMIN.as_ref()];
-    let (config_pda, _) = Address::derive_program_address(&config_seeds, &crate::ID).ok_or(ProgramError::InvalidSeeds)?;
+    let config_seeds: [&[u8]; 2] = [CONFIG_SEED, INITIAL_CONFIG_ADMIN.as_ref()];
+    let (config_pda, _) = Address::derive_program_address(&config_seeds, &crate::ID)
+        .ok_or(ProgramError::InvalidSeeds)?;
 
     validation::require_addresses_match(config.address(), &config_pda)?;
     validation::require_initialized_and_owned(config, &crate::ID, false)?;
@@ -74,20 +122,16 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
         let config_data = config.try_borrow()?;
         let config_state: &Config = from_bytes(&config_data);
         validation::require_discriminator(config_state.discriminator, CONFIG_DISCRIMINATOR)?;
-        (config_state.slippage_limit_bps, config_state.max_in_bps_of_vault)
+        (
+            config_state.slippage_limit_bps,
+            config_state.max_in_bps_of_vault,
+        )
     };
 
-    // max_in: a single trade can never exceed this fraction of the vault's
-    // CURRENT balance (before this deposit lands). 0 = uncapped.
-    if max_in_bps_of_vault > 0 {
-        let cap = (vault.lamports() as u128 * max_in_bps_of_vault as u128) / 10_000u128; //derive the cap as a value dependent on the money in vault. 
-        if (args.deposit_amount as u128) > cap {
-            return Err(OpenStakeError::SlippageExceeded.into());
-        }
-    }
-
-    // Read the market, check it, work out the new share numbers.
-    let (outcome_index, delta, new_outcome_shares, new_total_collected) = {
+    // Read the market, run the curve, and work out everything we need before
+    // touching any account. The borrow is dropped at the end of this block so
+    // we can write back to the market afterwards.
+    let (delta, new_outcome_shares, new_total_collected, market_bump, creator, nonce) = {
         let market_data = market.try_borrow()?;
         let market_state: &Market = from_bytes(&market_data);
 
@@ -95,51 +139,82 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
         if market_state.status != MarketStatus::Open as u8 {
             return Err(OpenStakeError::MarketNotOpen.into());
         }
+
+        // Betting stops well before the event starts. After this point the AMM
+        // never mints again - the supply is fixed and any further trading
+        // happens between people on the secondary market.
+
         let now = Clock::get()?.unix_timestamp;
-        if now >= market_state.bet_close_ts {
+        if now >= market_state.primary_end {
             return Err(OpenStakeError::MarketClosed.into());
         }
+
+        // The vault and mint passed in must be the ones this market recorded,
+        // or a bettor could pay into one market and be credited in another.
         validation::require_addresses_match(vault.address(), &market_state.vault)?;
+        validation::require_addresses_match(quote_mint.address(), &market_state.quote_mint)?;
+
+        // Trade-size cap. Measured against what's in the vault right now, so
+        // the allowed size grows on its own as the market gets deeper - no
+        // fixed number to keep re-tuning. Early on liquidity is thin, and this
+        // is what stops a whale swinging the whole market in one shot.
+        //
+        // Must come AFTER the vault address check above: reading the balance
+        // of an unverified account would let a caller point at some other fat
+        // vault and compute the cap against the wrong number.
+        if max_in_bps_of_vault > 0 {
+            let vault_amount = Account::from_account_view(vault)?.amount();
+            let cap = (vault_amount as u128 * max_in_bps_of_vault as u128) / 10_000u128;
+            if (args.deposit_amount as u128) > cap {
+                return Err(OpenStakeError::SlippageExceeded.into());
+            }
+        }
 
         let outcome_index = args.outcome_index as usize;
         if outcome_index >= market_state.num_outcomes as usize {
             return Err(OpenStakeError::InvalidOutcome.into());
         }
 
+        // The curve. Paying in moves the market's share vector, and the price moves against you as you buy. That created gap is the slippage, and it's what makes swinging the price expensive.
+
         let old_total = market_state.outcome_shares[outcome_index];
         let cost_before = cost(&market_state.outcome_shares);
-        let new_total = buy_shares(&market_state.outcome_shares, outcome_index, args.deposit_amount)
+        let new_total = buy_shares(
+            &market_state.outcome_shares,
+            outcome_index,
+            args.deposit_amount,
+        )
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+        let delta = new_total
+            .checked_sub(old_total)
             .ok_or(ProgramError::ArithmeticOverflow)?;
-        let delta = new_total.checked_sub(old_total).ok_or(ProgramError::ArithmeticOverflow)?;
+
+        // Share amounts round down, so a tiny deposit into a deep pool can buy
+        // literally nothing. Never take someone's money for zero shares.
         if delta == 0 {
             return Err(OpenStakeError::PaymentTooSmall.into());
         }
 
-        // Global slippage protection, integer-only (no floats on-chain,
-        // matching every other check in this program — isqrt/checked u128
-        // math throughout curve.rs and payout.rs, no exception here).
-        //
-        // price_before = old_total / cost_before, so the naive flat-price
-        // estimate "deposit / price_before" is the same as
-        // "deposit * cost_before / old_total" — computed directly in u128,
-        // no division into a float ever happens. 0 = uncapped.
+        // Slippage cap. Compare what they actually got against the naive "price never moved" estimate, and reject if the gap is too wide.
+
+        // All integer maths, no floats - floats cost real compute on-chain and nothing else in this program uses them. Instead of dividing to get a percentage (which would lose precision), we cross-multiply:
+        //   shortfall / expected > limit / 10_000
+        // becomes
+        //   shortfall * 10_000 > expected * limit
+
         if slippage_limit_bps > 0 && old_total > 0 {
             let expected_shares = (args.deposit_amount as u128)
                 .checked_mul(cost_before)
                 .ok_or(ProgramError::ArithmeticOverflow)?
                 / (old_total as u128);
 
-            // shortfall = how many fewer shares the real trade minted vs
-            // the naive estimate. None means the real trade did BETTER
-            // than the naive estimate (can't happen on this convex curve,
-            // but if it ever did, that's not a slippage violation either
-            // way, so just skip the check).
+            // checked_sub returning None means they did BETTER than the naive
+            // estimate, which isn't a slippage problem, so skip the check.
+
             if let Some(shortfall) = expected_shares.checked_sub(delta as u128) {
-                // slippage_pct = shortfall / expected_shares. Compare
-                // against limit_bps/10_000 by cross-multiplying instead of
-                // dividing, so this never touches a float or loses
-                // precision: shortfall * 10_000 > limit_bps * expected.
-                let lhs = shortfall.checked_mul(10_000).ok_or(ProgramError::ArithmeticOverflow)?;
+                let lhs = shortfall
+                    .checked_mul(10_000)
+                    .ok_or(ProgramError::ArithmeticOverflow)?;
                 let rhs = expected_shares
                     .checked_mul(slippage_limit_bps as u128)
                     .ok_or(ProgramError::ArithmeticOverflow)?;
@@ -158,8 +233,23 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
             .checked_add(args.deposit_amount)
             .ok_or(ProgramError::ArithmeticOverflow)?;
 
-        (outcome_index, delta, new_outcome_shares, new_total_collected)
+        (
+            delta,
+            new_outcome_shares,
+            new_total_collected,
+            market_state.bump,
+            market_state.creator,
+            market_state.nonce,
+        )
     };
+
+    // The mint must be this market's mint for this outcome. Without this a
+    // bettor could pay here and have shares minted on some other market.
+    let index_byte = [args.outcome_index];
+    let mint_seeds: [&[u8]; 3] = [OUTCOME_MINT_SEED, market.address().as_ref(), &index_byte];
+    let (mint_pda, _) = Address::derive_program_address(&mint_seeds, &crate::ID)
+        .ok_or(ProgramError::InvalidSeeds)?;
+    validation::require_addresses_match(outcome_mint.address(), &mint_pda)?;
 
     // Write the updated market back.
     {
@@ -169,66 +259,43 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
         market_state.total_collected = new_total_collected;
     }
 
-    // Position: top up if it already exists, create it if this is the
-    // bettor's first bet in this market.
-    if position.is_data_empty() {
-        let position_seeds: [&[u8]; 3] = [POSITION_SEED, market.address().as_ref(), bettor.address().as_ref()];
-        let (position_pda, position_bump) = Address::derive_program_address(&position_seeds, &crate::ID)
-            .ok_or(ProgramError::InvalidSeeds)?;
-        validation::require_addresses_match(position.address(), &position_pda)?;
+    // Money in. total_collected above and this transfer must always match
 
-        let rent = Rent::get()?;
-        let bump_seed = [position_bump];
-        let signer_seeds = [
-            Seed::from(POSITION_SEED),
-            Seed::from(market.address().as_ref()),
-            Seed::from(bettor.address().as_ref()),
-            Seed::from(bump_seed.as_ref()),
-        ];
-        CreateAccount {
-            from: bettor,
-            to: position,
-            lamports: rent.try_minimum_balance(core::mem::size_of::<Position>())?,
-            space: core::mem::size_of::<Position>() as u64,
-            owner: &crate::ID,
-        }
-        .invoke_signed(&[Signer::from(&signer_seeds)])?;
+    TransferChecked::new(
+        bettor_quote_ata,
+        quote_mint,
+        vault,
+        bettor,
+        args.deposit_amount,
+        QUOTE_DECIMALS,
+    )
+    .invoke()?;
 
-        let mut fresh_shares = [0u64; MAX_OUTCOMES];
-        fresh_shares[outcome_index] = delta;
-
-        let position_state = Position {
-            outcome_shares: fresh_shares,
-            market: *market.address(),
-            owner: *bettor.address(),
-            discriminator: POSITION_DISCRIMINATOR,
-            claimed: 0,
-            bump: position_bump,
-            _padding: [0u8; 6],
-        };
-        position.try_borrow_mut()?.copy_from_slice(bytes_of(&position_state));
-    } else {
-        validation::require_owned_by(position, &crate::ID)?;
-
-        let mut position_data = position.try_borrow_mut()?;
-        let position_state: &mut Position = bytemuck::from_bytes_mut(&mut position_data);
-
-        validation::require_discriminator(position_state.discriminator, POSITION_DISCRIMINATOR)?;
-        validation::require_addresses_match(&position_state.market, market.address())?;
-        validation::require_addresses_match(&position_state.owner, bettor.address())?;
-
-        position_state.outcome_shares[outcome_index] = position_state.outcome_shares[outcome_index]
-            .checked_add(delta)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
-    }
-
-    // Move the real money in.
-    Transfer {
-        from: bettor,
-        to: vault,
-        lamports: args.deposit_amount,
+    // The bettor needs somewhere to hold these shares. "Idempotent" means it quietly does nothing if they already have an account for this outcome, which is the normal case for anyone betting more than once.
+    CreateIdempotent {
+        funding_account: bettor,
+        account: bettor_outcome_ata,
+        wallet: bettor,
+        mint: outcome_mint,
+        system_program,
+        token_program,
     }
     .invoke()?;
+
+    // Shares out. The market PDA is the mint authority, so it signs by handing
+    // over the seeds it was built from
+
+    let nonce_bytes = nonce.to_le_bytes();
+    let market_bump_seed = [market_bump];
+    let market_signer_seeds = [
+        Seed::from(MARKET_SEED),
+        Seed::from(creator.as_ref()),
+        Seed::from(nonce_bytes.as_ref()),
+        Seed::from(market_bump_seed.as_ref()),
+    ];
+
+    MintTo::new(outcome_mint, bettor_outcome_ata, market, delta)
+        .invoke_signed(&[Signer::from(&market_signer_seeds)])?;
 
     Ok(())
 }
