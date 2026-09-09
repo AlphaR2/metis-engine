@@ -36,7 +36,7 @@ pub mod authority {
         svm.set_sysvar(&clock);
         let program_bytes = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../target/deploy/openstake_oracle.so"
+            "/../target/deploy/oracle.so"
         ))
         .expect("build the SBF program first: cargo build-sbf");
         svm.add_program(program_id(), &program_bytes)

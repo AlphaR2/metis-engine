@@ -3,7 +3,7 @@ pub mod create_oracle {
     use crate::instructions::POracle;
     use crate::instructions::football::FootballSettled;
     use crate::state::MarketKind;
-    use crate::tests::tests::{ReusableState, program_id};
+    use crate::tests::tests::{FIXTURE_MERKLE_ROOT, ReusableState, program_id};
     use litesvm::LiteSVM;
     use solana_instruction::{AccountMeta, Instruction};
     use solana_message::Message;
@@ -19,7 +19,7 @@ pub mod create_oracle {
             ..
         } = state;
 
-        let football = FootballSettled::new(27034u32.to_le_bytes());
+        let football = FootballSettled::new(FIXTURE_MERKLE_ROOT);
 
         let create_ix = Instruction {
             program_id: program_id(),

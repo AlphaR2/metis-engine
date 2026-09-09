@@ -1,5 +1,10 @@
 use bytemuck::{CheckedBitPattern, NoUninit};
-use pinocchio::{AccountView, ProgramResult, error::ProgramError};
+use codama::CodamaType;
+use pinocchio::{
+    AccountView, ProgramResult,
+    error::ProgramError,
+    sysvars::{Sysvar, clock::Clock},
+};
 
 use crate::{
     errors::OracleError,
@@ -8,7 +13,7 @@ use crate::{
 };
 
 #[repr(C)]
-#[derive(NoUninit, CheckedBitPattern, Clone, Copy)]
+#[derive(NoUninit, CheckedBitPattern, Clone, Copy, CodamaType)]
 pub struct UpdateFootballArgs {
     pub score: u8,
     pub penalties: u8,
@@ -54,6 +59,11 @@ pub fn process_update_football(
     } else if update_kind == UpdateKind::EventState {
         borrowed_oracle_account_data.set_match_status(update_data.status)?;
     }
+
+    let time = Clock::get()?;
+    let current_time = time.unix_timestamp as u64;
+
+    borrowed_oracle_account_data.updated_at_unix = current_time.to_le_bytes();
 
     Ok(())
 }

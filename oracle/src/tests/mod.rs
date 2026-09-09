@@ -33,6 +33,8 @@ mod tests {
         pub individual_authority: Pubkey,
     }
 
+    pub const FIXTURE_MERKLE_ROOT: [u8; 32] = [27; 32];
+
     pub fn program_id() -> Pubkey {
         Pubkey::from(crate::ID)
     }
@@ -44,17 +46,14 @@ mod tests {
         svm.airdrop(&creator.pubkey(), 10 * 1_000_000_000)
             .expect("Airdrop failed");
 
-        let program_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../target/deploy/openstake_oracle.so"
-        );
+        let program_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/deploy/oracle.so");
         let program_bytes =
             std::fs::read(program_path).expect("build the SBF program first: cargo build-sbf");
         svm.add_program(program_id(), &program_bytes)
             .expect("Failed to add program");
 
         let (oracle, _) = solana_address::Address::find_program_address(
-            &[b"football", b"settled", &27034u32.to_le_bytes()],
+            &[b"football", b"settled", &FIXTURE_MERKLE_ROOT],
             &crate::ID,
         );
         let (authority, _) =
@@ -123,7 +122,7 @@ mod tests {
         let football = bytemuck::checked::try_from_bytes::<FootballSettled>(&oracle_account.data)
             .expect("oracle account contains football data");
 
-        assert_eq!(football.match_id, 27034u32.to_le_bytes());
+        assert_eq!(football.fixture_merkle_root, FIXTURE_MERKLE_ROOT);
         assert_eq!(football.score, 0x32, "invalid score");
         assert_eq!(
             football.penalties, 0,
@@ -138,7 +137,7 @@ mod tests {
         svm.airdrop(&outsider.pubkey(), 10 * 1_000_000_000)
             .expect("outsider is funded");
 
-        let football = FootballSettled::new(27034u32.to_le_bytes());
+        let football = FootballSettled::new(FIXTURE_MERKLE_ROOT);
         let create_ix = Instruction {
             program_id: program_id(),
             accounts: vec![

@@ -1,24 +1,29 @@
 use bytemuck::{CheckedBitPattern, NoUninit, Pod, Zeroable};
 // use pack1::U32LE;
-use pinocchio::ProgramResult;
+use pinocchio::{
+    ProgramResult,
+    sysvars::{Sysvar, clock::Clock},
+};
 
 use crate::{errors::OracleError, state::MarketKind};
+use codama::{CodamaAccount, CodamaType};
 
 #[repr(C)]
-#[derive(Default, Clone, Copy, NoUninit, CheckedBitPattern)]
+#[derive(Default, Clone, Copy, NoUninit, CheckedBitPattern, CodamaAccount)]
 pub struct FootballSettled {
     pub market_kind: MarketKind,
-    pub match_id: [u8; 4],
+    /// Immutable commitment to the provider fixture aliases for this event.
+    /// This is also the unique identity used to derive this account's PDA.
+    pub fixture_merkle_root: [u8; 32],
     pub score: u8, // this is a bitpack - higher 4 bits is home, lower 4 bits is away
     pub penalties: u8, // this is a bitpack - higher 4 bits is home, lower 4 bits is away
     pub status: CFootballMatchPhase, // 1 byte
-                   // _p: u8,
-                   // pub match_id: U32LE, // [u8; 4],
+    pub updated_at_unix: [u8; 8], // u64
 }
 
 #[allow(warnings)]
 #[repr(u8)]
-#[derive(Clone, Copy, Default, NoUninit, CheckedBitPattern, PartialEq)]
+#[derive(Clone, Copy, Default, NoUninit, CheckedBitPattern, PartialEq, CodamaType)]
 pub enum CFootballMatchPhase {
     #[default]
     Scheduled = 0,
@@ -63,13 +68,33 @@ impl CFootballMatchPhase {
 impl FootballSettled {
     pub const LEN: usize = core::mem::size_of::<Self>();
 
-    pub fn new(match_id: [u8; 4]) -> Self {
+    pub fn new(fixture_merkle_root: [u8; 32]) -> Self {
+        let current_time = {
+            #[cfg(target = "solana")]
+            {
+                let clock = Clock::get().expect("could  not get time");
+                let current_time = clock.unix_timestamp as u64;
+                current_time
+            }
+
+            #[cfg(not(target = "solana"))]
+            {
+                let time = std::time::SystemTime::now();
+                let current_time = time
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .expect("time went backwards")
+                    .as_secs();
+                current_time
+            }
+        };
+
         Self {
             market_kind: MarketKind::Football,
-            match_id,
+            fixture_merkle_root,
             score: 0x00,
             penalties: 0x00,
             status: CFootballMatchPhase::Scheduled,
+            updated_at_unix: current_time.to_le_bytes(),
         }
     }
 
@@ -161,11 +186,24 @@ impl FootballSettled {
 
 #[cfg(test)]
 mod tests {
+    use core::time::Duration;
+    use std::thread::sleep;
+
     use super::{CFootballMatchPhase, FootballSettled};
 
     #[test]
+    fn check_time() {
+        let time = std::time::SystemTime::now();
+        let current_time = time
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_secs();
+        println!("hello time is {}", current_time);
+    }
+
+    #[test]
     fn accepts_every_valid_match_path() {
-        let mut ordinary_match = FootballSettled::new([1; 4]);
+        let mut ordinary_match = FootballSettled::new([1; 32]);
         for status in [
             CFootballMatchPhase::FirstHalf,
             CFootballMatchPhase::HalfTime,
@@ -175,7 +213,7 @@ mod tests {
             ordinary_match.set_match_status(status).unwrap();
         }
 
-        let mut extra_time_match = FootballSettled::new([2; 4]);
+        let mut extra_time_match = FootballSettled::new([2; 32]);
         for status in [
             CFootballMatchPhase::FirstHalf,
             CFootballMatchPhase::HalfTime,
@@ -192,7 +230,7 @@ mod tests {
 
     #[test]
     fn rejects_skipped_or_backwards_transitions() {
-        let mut match_state = FootballSettled::new([3; 4]);
+        let mut match_state = FootballSettled::new([3; 32]);
 
         assert!(
             match_state
@@ -224,7 +262,7 @@ mod tests {
 
     #[test]
     fn accepts_idempotent_status_updates() {
-        let mut match_state = FootballSettled::new([4; 4]);
+        let mut match_state = FootballSettled::new([4; 32]);
         match_state
             .set_match_status(CFootballMatchPhase::Scheduled)
             .unwrap();

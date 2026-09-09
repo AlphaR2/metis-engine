@@ -26,7 +26,11 @@ pub fn process_create_football(accounts: &mut [AccountView], data: &[u8]) -> Pro
 
     // deriving bump onchain
     let bump = {
-        let pda_seeds: [&[u8]; 3] = [b"football", b"settled", &received_data_serialised.match_id];
+        let pda_seeds: [&[u8]; 3] = [
+            b"football",
+            b"settled",
+            &received_data_serialised.fixture_merkle_root,
+        ];
         let try_create_account = Address::derive_program_address(&pda_seeds, &crate::ID)
             .ok_or(OracleError::InvalidOraclePda)?;
 
@@ -41,7 +45,7 @@ pub fn process_create_football(accounts: &mut [AccountView], data: &[u8]) -> Pro
     let seeds = [
         Seed::from(b"football"),
         Seed::from(b"settled"),
-        Seed::from(&received_data_serialised.match_id),
+        Seed::from(&received_data_serialised.fixture_merkle_root),
         Seed::from(bump),
     ];
 
@@ -53,8 +57,7 @@ pub fn process_create_football(accounts: &mut [AccountView], data: &[u8]) -> Pro
         .map_err(|_| OracleError::RentCalculationFailed)?;
 
     // log!("size ser is: {}", size);
-    // log!("match id is: ");
-    // log!("{}", u32::from_le_bytes(received_data_serialised.match_id));
+    // The fixture Merkle root is immutable and doubles as this PDA's identity.
 
     CreateAccount {
         from: creator,
