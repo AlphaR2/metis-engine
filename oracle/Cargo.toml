@@ -1,5 +1,5 @@
 [package]
-name = "openstake-oracle"
+name = "metis-oracle"
 version = "0.1.0"
 edition = "2024"
 

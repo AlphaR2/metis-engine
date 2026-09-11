@@ -12,7 +12,7 @@ use pinocchio_token::{
 use crate::{
     amm::state::{MARKET_DISCRIMINATOR, Market, MarketStatus},
     constants::{MARKET_SEED, OUTCOME_MINT_SEED, QUOTE_DECIMALS},
-    error::OpenStakeError,
+    error::MetisError,
     settlement::payout::compute_payout,
     validation,
 };
@@ -65,7 +65,7 @@ pub fn process_claim(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResul
 
         validation::require_discriminator(market_state.discriminator, MARKET_DISCRIMINATOR)?;
         if market_state.status != MarketStatus::Settled as u8 {
-            return Err(OpenStakeError::MarketNotSettled.into());
+            return Err(MetisError::MarketNotSettled.into());
         }
 
         validation::require_addresses_match(vault.address(), &market_state.vault)?;
@@ -109,7 +109,7 @@ pub fn process_claim(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResul
     };
 
     if winning_shares == 0 {
-        return Err(OpenStakeError::AlreadyClaimed.into());
+        return Err(MetisError::AlreadyClaimed.into());
     }
 
     let payout = compute_payout(winning_shares, total_collected, all_winning_shares);

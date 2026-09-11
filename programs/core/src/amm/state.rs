@@ -33,6 +33,8 @@ impl TryFrom<u8> for MarketStatus {
 pub struct Market {
     /// Recorded shares for each side. For a simple binary market we have [xa, xb].
     pub outcome_shares: [u64; MAX_OUTCOMES],
+    /// The virtual liquidity param for each market. Frozen at initialize_market, k × symmetric_seed(fee, outcomes)
+     pub virtual_per_side: u64,
     /// Total money paid into the vault. Mirror of the vault's balance
     pub total_collected: u64,
     /// Unix timestamp (seconds) after which place_bet stops accepting bets.
@@ -63,7 +65,7 @@ pub struct Market {
     pub _padding: [u8; 4],
 }
 
-const _: () = assert!(core::mem::size_of::<Market>() == 192);
+const _: () = assert!(core::mem::size_of::<Market>() == 200);
 const _: () = assert!(core::mem::align_of::<Market>() == 8);
 
 // ── Discriminators owned by this part
@@ -74,7 +76,7 @@ pub const INITIALIZE_MARKET: [u8; 8] = [35, 35, 189, 193, 155, 48, 170, 203];
 pub const PLACE_BET: [u8; 8] = [222, 62, 67, 220, 63, 166, 126, 33];
 
 // Tests for the market's on-chain layout. To see the printed output:
-//   cargo test -p openstake-core --lib amm::state -- --nocapture
+//   cargo test -p metis-core --lib amm::state -- --nocapture
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +89,7 @@ mod tests {
     #[test]
     fn market_round_trips_through_zero_copy() {
         let market = Market {
+            virtual_per_side: 424,
             outcome_shares: [7, 9],
             total_collected: 16,
             bet_close_ts: 1_800_000_000,
@@ -112,6 +115,7 @@ mod tests {
             core::mem::align_of::<Market>()
         );
         println!("  outcome_shares:  {:?}", recovered.outcome_shares);
+        println!("  virtual_per_side:{}", recovered.virtual_per_side);
         println!("  total_collected: {}", recovered.total_collected);
         println!("  bet_close_ts:    {} (kickoff)", recovered.bet_close_ts);
         println!(

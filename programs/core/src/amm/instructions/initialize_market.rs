@@ -13,13 +13,14 @@ use pinocchio_token::{
 };
 
 use crate::{
+    amm::curve::virtual_liquidity_per_side,
     amm::state::{MARKET_DISCRIMINATOR, Market, MarketStatus},
     config::state::{CONFIG_DISCRIMINATOR, Config},
     constants::{
         AUTHORITY, CONFIG_SEED, INITIAL_CONFIG_ADMIN, MARKET_SEED, MAX_OUTCOMES, OUTCOME_MINT_SEED,
         OUTCOME_UNRESOLVED, PRIMARY_WINDOW_SECS, QUOTE_DECIMALS, VAULT_SEED,
     },
-    error::OpenStakeError,
+    error::MetisError,
     validation,
 };
 
@@ -138,7 +139,9 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
     //   market_init_fee - what the creator stakes to open the market
     //   max_outcomes    - admin-set ceiling on outcomes per market
     //   quote_mint      - the only stablecoin markets may be priced in
-    let (market_init_fee, max_outcomes, cfg_quote_mint) = {
+    //   virtual_liquidity_multiple - how many times the creator's stake is multiplied to give the market a starting shape
+
+    let (market_init_fee, max_outcomes, cfg_quote_mint, virtual_liquidity_multiple) = {
         let config_data = config.try_borrow()?;
         let config_state: &Config = from_bytes(&config_data);
         validation::require_discriminator(config_state.discriminator, CONFIG_DISCRIMINATOR)?;
@@ -146,6 +149,7 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
             config_state.market_init_fee,
             config_state.max_outcomes,
             config_state.quote_mint,
+            config_state.virtual_liquidity_multiple,
         )
     };
 
@@ -276,8 +280,15 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
     // A stake too small to produce even one share per side would still leave us
     // at zero, so refuse rather than open a broken market.
     if seed_per_side == 0 {
-        return Err(OpenStakeError::PaymentTooSmall.into());
+        return Err(MetisError::PaymentTooSmall.into());
     }
+
+    // docs/mvp.md 1.4: frozen on the market for life, computed once from
+    // whatever Config.virtual_liquidity_multiple happens to be right now -
+    // like quote_mint, a later admin change only affects markets created
+    // after that change, never this one.
+    let virtual_per_side = virtual_liquidity_per_side(seed_per_side, virtual_liquidity_multiple)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
 
     // Fill one slot per real outcome; any unused slots stay at 0.
     let mut outcome_shares = [0u64; MAX_OUTCOMES];
@@ -358,6 +369,7 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
     // solvency check at settlement will fail.
     let market_state = Market {
         outcome_shares,
+        virtual_per_side, //frozen in at creation, never changes for this market
         total_collected: market_init_fee,
         bet_close_ts: args.bet_close_ts,
         primary_end,

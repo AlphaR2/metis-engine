@@ -6,20 +6,17 @@ use pinocchio::{
     sysvars::{Sysvar, clock::Clock},
 };
 use pinocchio_associated_token_account::instructions::CreateIdempotent;
-use pinocchio_token::{
-    instructions::{MintTo, TransferChecked},
-    state::Account,
-};
+use pinocchio_token::instructions::{MintTo, TransferChecked};
 
 use crate::{
-    amm::curve::{buy_shares, cost},
+    amm::curve::{cost, priced_shares, quote_buy},
     amm::state::{MARKET_DISCRIMINATOR, Market, MarketStatus},
     config::state::{CONFIG_DISCRIMINATOR, Config},
     constants::{
-        CONFIG_SEED, INITIAL_CONFIG_ADMIN, MARKET_SEED, MAX_OUTCOMES, OUTCOME_MINT_SEED,
-        QUOTE_DECIMALS,
+        CONFIG_SEED, INITIAL_CONFIG_ADMIN, MARKET_SEED, MAX_OUTCOMES, MAX_PRICE_IMPACT_BPS,
+        OUTCOME_MINT_SEED, QUOTE_DECIMALS,
     },
-    error::OpenStakeError,
+    error::MetisError,
     validation,
 };
 
@@ -27,6 +24,12 @@ use crate::{
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct PlaceBetArgs {
     pub deposit_amount: u64,
+    /// Caller-supplied (computed off-chain from the quote
+    /// the trader was actually shown), not a program constant. The whole
+    /// job of this check is `if they recieve a small share than the min share out they set 
+    /// (delta < min_shares_out { reject })`. This is an
+    /// r-agnostic guard against a stale quote, never a formula artifact.
+    pub min_shares_out: u64,
     pub outcome_index: u8,
     pub _padding: [u8; 7],
 }
@@ -42,7 +45,7 @@ impl PlaceBetArgs {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<PlaceBetArgs>() == 16);
+const _: () = assert!(core::mem::size_of::<PlaceBetArgs>() == 24);
 
 /// Accounts:
 ///   0  market             (writable)
@@ -67,7 +70,7 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
         return Err(ProgramError::InvalidInstructionData);
     }
     if args.deposit_amount == 0 {
-        return Err(OpenStakeError::PaymentTooSmall.into());
+        return Err(MetisError::PaymentTooSmall.into());
     }
 
     let [
@@ -117,15 +120,12 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
     validation::require_addresses_match(config.address(), &config_pda)?;
     validation::require_initialized_and_owned(config, &crate::ID, false)?;
 
-    // get slippage setup and protection params
-    let (slippage_limit_bps, max_in_bps_of_vault) = {
+    // get trade-cap protection params
+    let max_in_bps_of_vault = {
         let config_data = config.try_borrow()?;
         let config_state: &Config = from_bytes(&config_data);
         validation::require_discriminator(config_state.discriminator, CONFIG_DISCRIMINATOR)?;
-        (
-            config_state.slippage_limit_bps,
-            config_state.max_in_bps_of_vault,
-        )
+        config_state.max_in_bps_of_vault
     };
 
     // Read the market, run the curve, and work out everything we need before
@@ -137,7 +137,7 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
 
         validation::require_discriminator(market_state.discriminator, MARKET_DISCRIMINATOR)?;
         if market_state.status != MarketStatus::Open as u8 {
-            return Err(OpenStakeError::MarketNotOpen.into());
+            return Err(MetisError::MarketNotOpen.into());
         }
 
         // Betting stops well before the event starts. After this point the AMM
@@ -146,7 +146,7 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
 
         let now = Clock::get()?.unix_timestamp;
         if now >= market_state.primary_end {
-            return Err(OpenStakeError::MarketClosed.into());
+            return Err(MetisError::MarketClosed.into());
         }
 
         // The vault and mint passed in must be the ones this market recorded,
@@ -154,74 +154,56 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
         validation::require_addresses_match(vault.address(), &market_state.vault)?;
         validation::require_addresses_match(quote_mint.address(), &market_state.quote_mint)?;
 
-        // Trade-size cap. Measured against what's in the vault right now, so
-        // the allowed size grows on its own as the market gets deeper - no
-        // fixed number to keep re-tuning. Early on liquidity is thin, and this
-        // is what stops a whale swinging the whole market in one shot.
-        //
-        // Must come AFTER the vault address check above: reading the balance
-        // of an unverified account would let a caller point at some other fat
-        // vault and compute the cap against the wrong number.
-        if max_in_bps_of_vault > 0 {
-            let vault_amount = Account::from_account_view(vault)?.amount();
-            let cap = (vault_amount as u128 * max_in_bps_of_vault as u128) / 10_000u128;
-            if (args.deposit_amount as u128) > cap {
-                return Err(OpenStakeError::SlippageExceeded.into());
-            }
-        }
-
         let outcome_index = args.outcome_index as usize;
         if outcome_index >= market_state.num_outcomes as usize {
-            return Err(OpenStakeError::InvalidOutcome.into());
+            return Err(MetisError::InvalidOutcome.into());
         }
 
-        // The curve. Paying in moves the market's share vector, and the price moves against you as you buy. That created gap is the slippage, and it's what makes swinging the price expensive.
-
-        let old_total = market_state.outcome_shares[outcome_index];
-        let cost_before = cost(&market_state.outcome_shares);
-        let new_total = buy_shares(
-            &market_state.outcome_shares,
-            outcome_index,
-            args.deposit_amount,
-        )
-        .ok_or(ProgramError::ArithmeticOverflow)?;
-        let delta = new_total
-            .checked_sub(old_total)
+        // Priced view: real shares plus this market's frozen virtual offset
+        // (docs/mvp.md 1.4). Every curve call below uses this, never
+        // market_state.outcome_shares directly — that field stays read-only,
+        // which is what the write-back and payouts read.
+        // basically call `priced_shares` function and feed 
+        // it the market_state.outcome_shares and market_state.virtual_per_side
+        // So it returns  the num of shares [yes+v, no+v].
+        let priced = priced_shares(&market_state.outcome_shares, market_state.virtual_per_side)
             .ok_or(ProgramError::ArithmeticOverflow)?;
 
-        // Share amounts round down, so a tiny deposit into a deep pool can buy
-        // literally nothing. Never take someone's money for zero shares.
-        if delta == 0 {
-            return Err(OpenStakeError::PaymentTooSmall.into());
+        // Trade-size cap, measured against priced depth rather than raw
+        // vault balance (docs/mvp.md 1.2/1.6) — scales with the market's
+        // true curve depth, real + virtual, not just dollars sitting in the
+        // vault. Early on this is what stops a whale swinging the whole
+        // market in one shot.
+        if max_in_bps_of_vault > 0 {
+            let depth = cost(&priced);
+            // get the max amount allowed to be deposited in the market based on the max_in_bps_of_vault
+            // already it is expected that this is calculated 
+            let cap = (depth * max_in_bps_of_vault as u128) / 10_000u128;
+            if (args.deposit_amount as u128) > cap {
+                return Err(MetisError::TradeCapExceeded.into());
+            }
         }
 
-        // Slippage cap. Compare what they actually got against the naive "price never moved" estimate, and reject if the gap is too wide.
+        // The curve, executed once: gives the real share delta, the
+        // execution price, and the resulting price impact off the same
+        // transition — no separate re-derivation for each check below.
+        let quote = quote_buy(&priced, outcome_index, args.deposit_amount)
+            .ok_or(MetisError::PaymentTooSmall)?;
 
-        // All integer maths, no floats - floats cost real compute on-chain and nothing else in this program uses them. Instead of dividing to get a percentage (which would lose precision), we cross-multiply:
-        //   shortfall / expected > limit / 10_000
-        // becomes
-        //   shortfall * 10_000 > expected * limit
+        let delta = quote.shares_received;
 
-        if slippage_limit_bps > 0 && old_total > 0 {
-            let expected_shares = (args.deposit_amount as u128)
-                .checked_mul(cost_before)
-                .ok_or(ProgramError::ArithmeticOverflow)?
-                / (old_total as u128);
+        // docs/mvp.md 1.5: caller-supplied, r-agnostic guard against a
+        // stale quote. The user share protection parameter. 
+        if delta < args.min_shares_out {
+            return Err(MetisError::SlippageExceeded.into());
+        }
 
-            // checked_sub returning None means they did BETTER than the naive
-            // estimate, which isn't a slippage problem, so skip the check.
+        // docs/mvp.md 1.2: forward-only hard impact ceiling.
+        // check that the price impact is not too high 
+        // (MAX_PRICE_IMPACT_BPS is 10pp), if it is, reject the trade.
 
-            if let Some(shortfall) = expected_shares.checked_sub(delta as u128) {
-                let lhs = shortfall
-                    .checked_mul(10_000)
-                    .ok_or(ProgramError::ArithmeticOverflow)?;
-                let rhs = expected_shares
-                    .checked_mul(slippage_limit_bps as u128)
-                    .ok_or(ProgramError::ArithmeticOverflow)?;
-                if lhs > rhs {
-                    return Err(OpenStakeError::SlippageExceeded.into());
-                }
-            }
+        if quote.price_impact_bps > MAX_PRICE_IMPACT_BPS as u32 {
+            return Err(MetisError::PriceImpactExceeded.into());
         }
 
         let mut new_outcome_shares = market_state.outcome_shares;

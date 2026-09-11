@@ -1,7 +1,7 @@
 // Shared litesvm test harness. This file is included via `mod common;` by
 // each integration test binary in tests/ — each one is its own separate
 // crate, so everything from the real program is reached through the
-// external `openstake_core` crate name, not `crate::`.
+// external `metis_core` crate name, not `crate::`.
 //
 // allow(dead_code): each test binary only uses a subset of these helpers,
 // so unused-in-this-binary warnings are expected and not worth silencing
@@ -19,14 +19,14 @@ use solana_sdk::{
 };
 use std::str::FromStr;
 
-use openstake_core::{
+use metis_core::{
     amm::instructions::{initialize_market::InitializeMarketArgs, place_bet::PlaceBetArgs},
     config::instructions::{
         initialize_config::InitializeConfigArgs, update_config::UpdateConfigArgs,
     },
     constants::{
-        CONFIG_SEED, MARKET_INIT_FEE, MARKET_SEED, MAX_OUTCOMES, OUTCOME_MINT_SEED,
-        PRIMARY_WINDOW_SECS, QUOTE_DECIMALS, VAULT_SEED,
+        CONFIG_SEED, MARKET_SEED, MAX_OUTCOMES, MIN_SEED, OUTCOME_MINT_SEED,
+        PRIMARY_WINDOW_SECS, QUOTE_DECIMALS, VAULT_SEED, VIRTUAL_LIQUIDITY_MULTIPLE,
     },
     settlement::instructions::settle_market::SettleMarketArgs,
 };
@@ -65,7 +65,7 @@ pub fn usdc_mint() -> Pubkey {
 // the workspace root rather than assuming a relative "target/deploy/...".
 pub fn setup() -> LiteSVM {
     let so_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/deploy/openstake_core.so");
+        .join("../../target/deploy/metis_core.so");
     let mut svm = LiteSVM::new();
     svm.add_program_from_file(program_id(), &so_path)
         .unwrap_or_else(|e| panic!("load {so_path:?} — did you run `just build-core`? ({e:?})"));
@@ -213,12 +213,25 @@ pub fn funded_bettor(svm: &mut LiteSVM, usdc: u64) -> (Keypair, Pubkey) {
 // singleton with limits switched off (0 = uncapped), which is what most tests
 // want — the ones testing the limits set their own via update_config.
 pub fn setup_with_config(svm: &mut LiteSVM) -> Pubkey {
-    setup_with_config_limits(svm, 0, 0)
+    setup_with_config_limits(svm, 0)
 }
 
-pub fn setup_with_config_limits(
+pub fn setup_with_config_limits(svm: &mut LiteSVM, max_in_bps_of_vault: u16) -> Pubkey {
+    setup_with_config_fee(svm, MIN_SEED, max_in_bps_of_vault)
+}
+
+// For tests that need a market_init_fee other than the standard
+// MIN_SEED - e.g. a deliberately tiny fee to reach the discrete/toy
+// regime where isqrt's floor-rounding actually produces a delta of 0. At
+// real MIN_SEED scale that's unreachable: since price = q/C(q) <= 1
+// always, the true share-delta for any payment P is always >= P in the
+// continuous limit, and real pools are deep enough that the continuous
+// approximation is exact - so payment=1 floors to 1, never 0. Only a
+// genuinely small pool (a handful of raw units, not millions) is close
+// enough to the curve's discreteness for that to happen.
+pub fn setup_with_config_fee(
     svm: &mut LiteSVM,
-    slippage_limit_bps: u16,
+    market_init_fee: u64,
     max_in_bps_of_vault: u16,
 ) -> Pubkey {
     let authority = authority_keypair();
@@ -234,9 +247,8 @@ pub fn setup_with_config_limits(
         ix_initialize_config(
             &authority.pubkey(),
             &config,
-            MARKET_INIT_FEE,
+            market_init_fee,
             0, // fee_bps — no fee mechanism wired up yet
-            slippage_limit_bps,
             max_in_bps_of_vault,
             &authority.pubkey(),
             &usdc_mint(),
@@ -282,14 +294,14 @@ pub fn primary_end_of(bet_close_ts: i64) -> i64 {
 // repo. Point this at wherever that keypair file actually lives; never
 // commit the file itself.
 pub fn authority_keypair() -> Keypair {
-    let path = std::env::var("OPENSTAKE_AUTHORITY_KEYPAIR")
+    let path = std::env::var("METIS_AUTHORITY_KEYPAIR")
         .unwrap_or_else(|_| "keys/authority.json".to_string());
     read_keypair_file(&path).unwrap_or_else(|_| {
         panic!(
             "couldn't load the authority keypair from {path} \
-             (set OPENSTAKE_AUTHORITY_KEYPAIR, or place it at keys/authority.json) — \
+             (set METIS_AUTHORITY_KEYPAIR, or place it at keys/authority.json) — \
              this must be the keypair for {}, matching constants::AUTHORITY",
-            openstake_core::constants::AUTHORITY,
+            metis_core::constants::AUTHORITY,
         )
     })
 }
@@ -361,7 +373,7 @@ pub fn ix_initialize_market(
         num_outcomes,
         _padding: [0u8; 7],
     };
-    let mut data = openstake_core::amm::state::INITIALIZE_MARKET.to_vec();
+    let mut data = metis_core::amm::state::INITIALIZE_MARKET.to_vec();
     data.extend_from_slice(bytes_of(&args));
 
     let (mint_0, _) = outcome_mint_pda(market, 0);
@@ -389,6 +401,7 @@ pub fn ix_initialize_market(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // see ix_initialize_market's note above
 pub fn ix_place_bet(
     market: &Pubkey,
     vault: &Pubkey,
@@ -396,14 +409,16 @@ pub fn ix_place_bet(
     bettor_quote_ata: &Pubkey,
     outcome_index: u8,
     deposit_amount: u64,
+    min_shares_out: u64,
     config: &Pubkey,
 ) -> Instruction {
     let args = PlaceBetArgs {
         deposit_amount,
+        min_shares_out,
         outcome_index,
         _padding: [0u8; 7],
     };
-    let mut data = openstake_core::amm::state::PLACE_BET.to_vec();
+    let mut data = metis_core::amm::state::PLACE_BET.to_vec();
     data.extend_from_slice(bytes_of(&args));
 
     let (outcome_mint, _) = outcome_mint_pda(market, outcome_index);
@@ -437,7 +452,7 @@ pub fn ix_settle_market(
         winning_outcome,
         _padding: [0u8; 7],
     };
-    let mut data = openstake_core::settlement::state::SETTLE_MARKET.to_vec();
+    let mut data = metis_core::settlement::state::SETTLE_MARKET.to_vec();
     data.extend_from_slice(bytes_of(&args));
 
     Instruction {
@@ -458,7 +473,7 @@ pub fn ix_claim(
     bettor_quote_ata: &Pubkey,
     winning_outcome: u8,
 ) -> Instruction {
-    let data = openstake_core::settlement::state::CLAIM.to_vec();
+    let data = metis_core::settlement::state::CLAIM.to_vec();
     let (winning_mint, _) = outcome_mint_pda(market, winning_outcome);
 
     Instruction {
@@ -483,7 +498,6 @@ pub fn ix_initialize_config(
     config: &Pubkey,
     market_init_fee: u64,
     fee_bps: u16,
-    slippage_limit_bps: u16,
     max_in_bps_of_vault: u16,
     admin: &Pubkey,
     quote_mint: &Pubkey,
@@ -491,15 +505,15 @@ pub fn ix_initialize_config(
 ) -> Instruction {
     let args = InitializeConfigArgs {
         market_init_fee,
+        virtual_liquidity_multiple: VIRTUAL_LIQUIDITY_MULTIPLE,
         fee_bps,
-        slippage_limit_bps,
         max_in_bps_of_vault,
         admin: admin.to_bytes().into(),
         quote_mint: quote_mint.to_bytes().into(),
         max_outcomes,
-        _padding: [0u8; 1],
+        _padding: [0u8; 3],
     };
-    let mut data = openstake_core::config::state::INITIALIZE_CONFIG.to_vec();
+    let mut data = metis_core::config::state::INITIALIZE_CONFIG.to_vec();
     data.extend_from_slice(bytes_of(&args));
 
     Instruction {
@@ -519,7 +533,6 @@ pub fn ix_update_config(
     admin: &Pubkey,
     market_init_fee: u64,
     fee_bps: u16,
-    slippage_limit_bps: u16,
     max_in_bps_of_vault: u16,
     new_admin: &Pubkey,
     quote_mint: &Pubkey,
@@ -527,15 +540,15 @@ pub fn ix_update_config(
 ) -> Instruction {
     let args = UpdateConfigArgs {
         market_init_fee,
+        virtual_liquidity_multiple: VIRTUAL_LIQUIDITY_MULTIPLE,
         fee_bps,
-        slippage_limit_bps,
         max_in_bps_of_vault,
         new_admin: new_admin.to_bytes().into(),
         quote_mint: quote_mint.to_bytes().into(),
         max_outcomes,
-        _padding: [0u8; 1],
+        _padding: [0u8; 3],
     };
-    let mut data = openstake_core::config::state::UPDATE_CONFIG.to_vec();
+    let mut data = metis_core::config::state::UPDATE_CONFIG.to_vec();
     data.extend_from_slice(bytes_of(&args));
 
     Instruction {
@@ -572,6 +585,26 @@ pub fn send(
     svm.send_transaction(tx).map(|_| ())
 }
 
+// Same as send(), but keeps the transaction metadata instead of throwing it
+// away - this is where compute_units_consumed and the real lamport fee live.
+// Split out as its own function rather than changing send()'s return type,
+// since almost every call site only cares whether the transaction succeeded.
+#[allow(clippy::result_large_err)] // see send()'s note above
+pub fn send_with_meta(
+    svm: &mut LiteSVM,
+    ix: Instruction,
+    payer: &Keypair,
+    extra_signers: &[&Keypair],
+) -> Result<litesvm::types::TransactionMetadata, litesvm::types::FailedTransactionMetadata> {
+    let mut signers: Vec<&Keypair> = vec![payer];
+    signers.extend_from_slice(extra_signers);
+
+    let blockhash = svm.latest_blockhash();
+    let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &signers, blockhash);
+
+    svm.send_transaction(tx)
+}
+
 // One-call market setup used by most tests: a creator with USDC, a market
 // opened with the given kickoff time, and everything needed to bet on it.
 pub struct TestMarket {
@@ -602,7 +635,7 @@ pub fn open_market_with_config(
     bet_close_ts: i64,
     config: Pubkey,
 ) -> TestMarket {
-    let (creator, creator_quote_ata) = funded_bettor(svm, 100 * MARKET_INIT_FEE);
+    let (creator, creator_quote_ata) = funded_bettor(svm, 100 * MIN_SEED);
     let (market, _) = market_pda(&creator.pubkey(), nonce);
     let (vault, _) = vault_pda(&market);
 

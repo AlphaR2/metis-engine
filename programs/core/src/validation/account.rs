@@ -5,7 +5,7 @@
 
 use pinocchio::{AccountView, Address, error::ProgramError};
 
-use crate::error::OpenStakeError;
+use crate::error::MetisError;
 
 pub fn require_signer(account: &AccountView) -> Result<(), ProgramError> {
     if !account.is_signer() {
@@ -51,7 +51,7 @@ pub fn require_initialized_and_owned(
 
 pub fn require_discriminator(actual: [u8; 8], expected: [u8; 8]) -> Result<(), ProgramError> {
     if actual != expected {
-        return Err(OpenStakeError::DiscriminatorMismatch.into());
+        return Err(MetisError::DiscriminatorMismatch.into());
     }
     Ok(())
 }
@@ -64,7 +64,7 @@ pub fn require_addresses_match(actual: &Address, expected: &Address) -> Result<(
 }
 
 // Tests for the shared account checks. To see the printed output:
-//   cargo test -p openstake-core --lib validation -- --nocapture
+//   cargo test -p metis-core --lib validation -- --nocapture
 //
 // The signer/writable/owner checks can't be unit tested here - they need a
 // real AccountView, which only exists inside a running program. Those are
