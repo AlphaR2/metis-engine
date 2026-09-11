@@ -2,7 +2,7 @@ use pinocchio::error::ProgramError;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OpenStakeError {
+pub enum MetisError {
     /// Account's discriminator didn't match the expected type for this
     /// operation — e.g. a Vault passed where a Position was expected.
     DiscriminatorMismatch = 0,
@@ -39,10 +39,20 @@ pub enum OpenStakeError {
     /// place_bet's actual share delta came in under the caller's
     /// min_shares_out — the curve moved against them before the tx landed.
     SlippageExceeded = 9,
+
+    /// place_bet's deposit exceeds Config.max_in_bps_of_vault's share of the
+    /// market's priced depth (docs/mvp.md 1.2/1.6's sizing cap).
+    TradeCapExceeded = 10,
+
+    /// place_bet's deposit, once executed, would move probability by more
+    /// than MAX_PRICE_IMPACT_BPS — docs/mvp.md 1.2's forward-only hard
+    /// impact ceiling. Never an inversion: this checks the trade that
+    /// already happened, it never solves for a deposit size.
+    PriceImpactExceeded = 11,
 }
 
-impl From<OpenStakeError> for ProgramError {
-    fn from(e: OpenStakeError) -> Self {
+impl From<MetisError> for ProgramError {
+    fn from(e: MetisError) -> Self {
         ProgramError::Custom(e as u32)
     }
 }

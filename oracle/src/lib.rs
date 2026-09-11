@@ -3,7 +3,7 @@
 //! `constants::AUTHORITY` pubkey, a stand-in for a real oracle. This crate
 //! is where that gets replaced with a real one: a genuinely external
 //! integration (matching how Drift treats Pyth/Switchboard as separate
-//! programs it CPIs into), not an internal module of `openstake-core`.
+//! programs it CPIs into), not an internal module of `metis-core`.
 //!
 //! No logic here yet. When this gets built, the shape is roughly:
 //! a trait describing "who won outcome X for market Y," with concrete

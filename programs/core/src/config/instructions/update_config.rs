@@ -3,6 +3,10 @@ use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError};
 
 use crate::{
     config::state::{CONFIG_DISCRIMINATOR, Config},
+    constants::{
+        MAX_FEE_PRIMARY_BPS, MAX_OUTCOMES, MAX_PRICE_IMPACT_BPS, MAX_VIRTUAL_LIQUIDITY_MULTIPLE,
+        MIN_SEED,
+    },
     validation,
 };
 
@@ -12,14 +16,16 @@ use crate::{
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct UpdateConfigArgs {
     pub market_init_fee: u64,
+    /// Only affects markets created after this call — see Config's own
+    /// doc comment on this field.
+    pub virtual_liquidity_multiple: u64,
     pub fee_bps: u16,
-    pub slippage_limit_bps: u16,
     pub max_in_bps_of_vault: u16,
     pub new_admin: Address,
     /// Only affects markets created after this call.
     pub quote_mint: Address,
     pub max_outcomes: u8,
-    pub _padding: [u8; 1],
+    pub _padding: [u8; 3],
 }
 
 impl UpdateConfigArgs {
@@ -33,7 +39,7 @@ impl UpdateConfigArgs {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<UpdateConfigArgs>() == 80);
+const _: () = assert!(core::mem::size_of::<UpdateConfigArgs>() == 88);
 
 pub fn process_update_config(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let args = UpdateConfigArgs::load(data)?;
@@ -52,12 +58,26 @@ pub fn process_update_config(accounts: &mut [AccountView], data: &[u8]) -> Progr
     // validate admin to update mint
     validation::require_addresses_match(admin.address(), &config_state.admin)?;
 
-    if args.fee_bps as u32 > 10_000
-        || args.slippage_limit_bps as u32 > 10_000
-        || args.max_in_bps_of_vault as u32 > 10_000
+    // Same real per-field ceilings as initialize_config
+    if args.fee_bps > MAX_FEE_PRIMARY_BPS
+        || args.max_in_bps_of_vault > MAX_PRICE_IMPACT_BPS
+        || args.virtual_liquidity_multiple > MAX_VIRTUAL_LIQUIDITY_MULTIPLE
     {
         return Err(ProgramError::InvalidInstructionData);
     }
+
+    // The seed fee floor every impact/solvency figure in docs/research.md
+    // is analysed against MIN_SEED, so we enforce it here too.
+    if args.market_init_fee < MIN_SEED {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
+    // A config ceiling above what Market's account layout can hold would be
+    // a live setting that can never actually be reached.
+    if args.max_outcomes as usize > MAX_OUTCOMES {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
     if args.new_admin == Address::default() {
         return Err(ProgramError::InvalidInstructionData);
     }
@@ -68,8 +88,8 @@ pub fn process_update_config(accounts: &mut [AccountView], data: &[u8]) -> Progr
 
     config_state.market_init_fee = args.market_init_fee;
     config_state.fee_bps = args.fee_bps;
-    config_state.slippage_limit_bps = args.slippage_limit_bps;
     config_state.max_in_bps_of_vault = args.max_in_bps_of_vault;
+    config_state.virtual_liquidity_multiple = args.virtual_liquidity_multiple;
     config_state.admin = args.new_admin;
     config_state.quote_mint = args.quote_mint;
     config_state.max_outcomes = args.max_outcomes;

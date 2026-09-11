@@ -1,14 +1,14 @@
 //! Scaffold only. This is the integration surface for third-party
-//! providers — apps that plug into Openstake rather than building their own
-//! settlement engine. Openstake is the venue; a provider is a front-end
-//! that lets its own users interact with Openstake's markets.
+//! providers — apps that plug into Metis rather than building their own
+//! settlement engine. Metis is the venue; a provider is a front-end
+//! that lets its own users interact with Metis's markets.
 //!
 //! Off-chain only. Never compiled to SBF, never a dependency of
 //! `programs/core`. Trait stubs below map 1:1 onto the four things a
 //! provider needs to do:
 //!
-//! a. fetch and display Openstake's existing markets
-//! b. let their users create markets — these are Openstake markets
+//! a. fetch and display Metis's existing markets
+//! b. let their users create markets — these are Metis markets
 //!    underneath; the provider collects its own fee on top
 //! c. place bets on behalf of their users, primary or secondary market
 //! d. cash out / settle across whatever markets their users participated in
@@ -22,11 +22,11 @@ pub struct MarketSummary {
     pub status: u8,
 }
 
-pub trait OpenstakeProvider {
+pub trait MetisProvider {
     /// (a) List markets a provider's front-end can display to its users.
     fn list_markets(&self) -> Vec<MarketSummary>;
 
-    /// (b) Create a new Openstake market on a provider's behalf, tagging it
+    /// (b) Create a new Metis market on a provider's behalf, tagging it
     /// with whatever fee arrangement lets the provider collect its cut.
     fn create_market_for_provider(&self, provider_fee_bps: u16) -> [u8; 32];
 

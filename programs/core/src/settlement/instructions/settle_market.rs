@@ -10,7 +10,7 @@ use pinocchio_token::state::Account;
 
 use crate::{
     amm::state::{MARKET_DISCRIMINATOR, Market, MarketStatus},
-    error::OpenStakeError,
+    error::MetisError,
     validation,
 };
 
@@ -38,6 +38,7 @@ const _: () = assert!(core::mem::size_of::<SettleMarketArgs>() == 8);
 ///   0 market    (writable)
 ///   1 vault     (the market's USDC account, read only here)
 ///   2 authority (signer)
+///   3 oracle
 ///
 /// Records which outcome actually happened. No pricing runs here - the curve
 /// is finished by this point and never looked at again. All this does is write
@@ -66,17 +67,17 @@ pub fn process_settle_market(accounts: &mut [AccountView], data: &[u8]) -> Progr
 
     // Covers Uninitialized and already-Settled in one check.
     if market_state.status != MarketStatus::Open as u8 {
-        return Err(OpenStakeError::InvalidStatusTransition.into());
+        return Err(MetisError::InvalidStatusTransition.into());
     }
     if args.winning_outcome >= market_state.num_outcomes {
-        return Err(OpenStakeError::InvalidOutcome.into());
+        return Err(MetisError::InvalidOutcome.into());
     }
 
     // The event must have started before anyone can say who won. bet_close_ts
     // is kickoff, and settling is only honest once there's a result to report.
     let now = Clock::get()?.unix_timestamp;
     if now < market_state.bet_close_ts {
-        return Err(OpenStakeError::MarketClosed.into());
+        return Err(MetisError::MarketClosed.into());
     }
 
     // Solvency: the vault must still hold everything that was ever paid in,
@@ -96,7 +97,7 @@ pub fn process_settle_market(accounts: &mut [AccountView], data: &[u8]) -> Progr
         validation::require_addresses_match(vault_state.mint(), &market_state.quote_mint)?;
 
         if vault_state.amount() < market_state.total_collected {
-            return Err(OpenStakeError::VaultBalanceMismatch.into());
+            return Err(MetisError::VaultBalanceMismatch.into());
         }
     }
 

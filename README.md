@@ -1,10 +1,10 @@
-# Openstake
+# Metis
 
 A Solana peer-to-peer prediction market protocol. Trading is priced by a
 share-ratio geometric AMM (`C(q) = sqrt(Σqᵢ²)`); settlement is pari-mutuel —
 the winning outcome's holders split the entire pool, proportional to their
-holdings. See `docs/MVP_PLAN.md` for the full design and the reasoning behind
-each decision.
+holdings. See `docs/mvp.md` for the implementation plan and `docs/research.md`
+for the reasoning behind each decision.
 
 Built with [Pinocchio](https://github.com/anza-xyz/pinocchio) (not Anchor).
 Outcome shares are standard SPL tokens, one mint per outcome per market —
@@ -27,7 +27,7 @@ USDC, authority-controlled by the market's own PDA.
   real oracle/quorum system eventually lives, kept genuinely separate from
   the on-chain program.
 - **`sdk/`** — scaffold only. Off-chain client crate for third-party
-  providers integrating against Openstake's markets. Never compiled to SBF.
+  providers integrating against Metis's markets. Never compiled to SBF.
 - **`tools/compute-discriminators/`** — dev-only generator for the
   account/instruction discriminator constants baked into each part's
   `state.rs`. Regenerate with `cargo run --bin compute-discriminators` if a
@@ -45,7 +45,7 @@ deliberately temporary centralization point, tracked as a TODO in
 ## Common commands
 
 ```
-just build-core        # cargo build-sbf, produces target/deploy/openstake_core.so
+just build-core        # cargo build-sbf, produces target/deploy/metis_core.so
 just test-core          # the full litesvm integration suite (builds first)
 just test <crate>       # e.g. `just test core` for just the unit tests, no VM
 just bench <crate>      # criterion benchmarks
