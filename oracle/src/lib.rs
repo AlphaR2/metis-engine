@@ -1,16 +1,42 @@
-//! Scaffold only — explicitly deferred, see the root README and the
-//! restructure plan. `settle_market` currently checks a single hardcoded
-//! `constants::AUTHORITY` pubkey, a stand-in for a real oracle. This crate
-//! is where that gets replaced with a real one: a genuinely external
-//! integration (matching how Drift treats Pyth/Switchboard as separate
-//! programs it CPIs into), not an internal module of `metis-core`.
-//!
-//! No logic here yet. When this gets built, the shape is roughly:
-//! a trait describing "who won outcome X for market Y," with concrete
-//! implementations (a multisig-of-reporters, a CPI to a real price/result
-//! oracle, etc.) behind it.
+#![allow(unexpected_cfgs)]
+use pinocchio::{
+    AccountView, Address, ProgramResult, address::declare_id, entrypoint, error::ProgramError,
+};
 
-pub trait OutcomeOracle {
-    /// Returns the winning outcome index for a resolved event, if known.
-    fn resolve(&self, market_identifier: &[u8]) -> Option<u8>;
+use crate::instructions::POracle;
+
+use pinocchio_log::log;
+
+mod errors;
+mod instructions;
+mod state;
+mod tests;
+
+entrypoint!(process_instruction);
+
+declare_id!("PorC1q7btDTY3jyrNxCgieXU5a4nGzhchjjnThYM3un");
+
+pub fn process_instruction(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    if program_id != &ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    let (discriminator, data) = instruction_data
+        .split_first()
+        .ok_or(ProgramError::InvalidInstructionData)?;
+
+    match POracle::try_from(discriminator)? {
+        POracle::CreateOracle => instructions::process_create_oracle(accounts, data),
+        POracle::UpdateOracle => instructions::process_update_oracle(accounts, data),
+        POracle::InitializeAuthority => instructions::process_initialize_authority(accounts),
+        POracle::AttestAuthority => instructions::process_attest_authority(accounts),
+        POracle::RemoveAuthority => instructions::process_remove_authority(accounts),
+
+        _ => return Err(ProgramError::InvalidInstructionData),
+    }
+    // Ok(())
 }
