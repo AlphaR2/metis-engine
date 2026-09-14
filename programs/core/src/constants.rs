@@ -1,46 +1,79 @@
 use solana_address::{Address, address};
 pub const MARKET_SEED: &[u8] = b"market";
-pub const POSITION_SEED: &[u8] = b"position";
 pub const VAULT_SEED: &[u8] = b"vault";
 pub const CONFIG_SEED: &[u8] = b"config";
 pub const OUTCOME_MINT_SEED: &[u8] = b"outcome_mint";
-
-/// Outcome tokens use the same decimals as the quote mint (USDC = 6), which
-/// is what lets MARKET_INIT_FEE and the curve's share scale line up 1:1.
 pub const QUOTE_DECIMALS: u8 = 6;
 
 // Outcome encoding
 // N is a dial: bump it and every struct below resizes with it.
 // Valid as long as MAX_OUTCOMES stays well under 255
-
 pub const MAX_OUTCOMES: usize = 2;
 pub const OUTCOME_UNRESOLVED: u8 = u8::MAX; // highest u8 value, used as "no winner yet"
 
-// v1: fixed protocol-wide, not creator-chosen. Every market pays the same
-// fee and shares the same authority. Revisit if that ever needs to vary.
-pub const MARKET_INIT_FEE: u64 = 10_000_000; // TODO: confirm unit — see note below
-pub const PRIMARY_WINDOW_SECS: i64 = 5 * 60 * 60; // 5 hours before kickoff --  can be changed.  
+// v0.1: For this version, we wil set minimum creator capital cap as a fixed protocol-wide, not creator-chosen. 
+// Hence, Every market pays the same
+pub const MIN_SEED: u64 = 20_000_000; // 20 USDC (6 decimals), no max
+pub const PRIMARY_WINDOW_SECS: i64 = 5 * 60 * 60; // 5 hours before kickoff --  can be changed.
 
-// TODO(single-point-of-failure): see the full note on Market.authority in
-// state/market.rs — this constant is the thing planned to go away in favor
-// of quorum-based settlement. Deferred, not designed yet.
-//
-// TODO: placeholder — keypair lives at keys/authority.json, gitignored.
-// #[cfg(test) can't split this: cargo build-sbf never compiles with
-// --cfg test, so the deployed .so always bakes in the cfg(not(test))
-// branch regardless of what cargo test sees. A test-only value here is
-// silently ignored by the actual on-chain binary. Swap this for a real
+/// Curvature is fixed at r = 2 for mvp.
+pub const CURVATURE_R: u8 = 2;
+
+/// Virtual-liquidity multiple k (docs/mvp.md 1.4): virtual_per_side =
+/// k × (seed / 2^(1/r)).
+/// Employed Virtual Liq as per research from pump fun etc. 
+/// 30 is a reasonable starting point for the MVP, but this will
+/// be tuned in the future. The value of k is a tradeoff between liquidity and
+/// price sensitivity. A higher k means more liquidity but less price
+/// sensitivity, while a lower k means less liquidity but more price
+/// sensitivity. The value of k should be chosen based on the specific use
+/// case and the desired balance between liquidity and price sensitivity.
+pub const VIRTUAL_LIQUIDITY_MULTIPLE: u64 = 30;
+
+/// Ceiling on Config.virtual_liquidity_multiple. An admin picking k too high
+/// would make every market artificially deep and insensitive to real money;
+/// this bounds how far that dial can be pushed. Same role MAX_FEE_PRIMARY_BPS
+/// plays for fee_bps.
+pub const MAX_VIRTUAL_LIQUIDITY_MULTIPLE: u64 = 100;
+
+const _: () = assert!(VIRTUAL_LIQUIDITY_MULTIPLE <= MAX_VIRTUAL_LIQUIDITY_MULTIPLE);
+
+// ── Basis-point bounds for validation
+// bps fields on Config are validated against these, not against a bare
+// 10_000, so "mathematically valid" and "not predatory" stay two separate,
+// visible checks instead of one magic number doing both jobs.
+/// 100.00% in basis points.
+pub const BPS_DENOMINATOR: u16 = 10_000;
+
+/// Ceiling on Config.fee_bps — the fee taken on place_bet (AMM/primary
+/// market). Fees are a tunable business lever, but an admin (or a
+/// compromised admin key) should never be able to set one that eats a
+/// meaningful fraction of every trade. 50 = 0.50%.
+pub const MAX_FEE_PRIMARY_BPS: u16 = 50;
+
+/// Ceiling on secondary-market (CLOB) taker fee.
+pub const MAX_FEE_TAKER_BPS: u16 = 50;
+
+/// Ceiling on Config.max_in_bps_of_vault. Mirrors docs/research.md 3.4's
+/// "10 pp hard ceiling, never exceeded by any reachable trade" 
+/// 1000 = 10.00%. 
+/// 
+/// With 15% of the vault being the max and must not be practically hit anywhere in the system. 
+/// This means that a single trade can never move more than 10% of the vault, 
+/// which is a reasonable limit to prevent market manipulation and ensure liquidity. 
+/// This limit is also in line with industry standards for decentralized exchanges and automated market makers, where large trades can have a significant impact on prices and liquidity. 
+/// 
+/// By setting a hard ceiling on the maximum percentage of the vault that can be used in a single trade, we can help maintain a fair and stable trading environment for all users.
+pub const MAX_PRICE_IMPACT_BPS: u16 = 1_000;
+
+const _: () = assert!(MAX_FEE_PRIMARY_BPS <= BPS_DENOMINATOR);
+const _: () = assert!(MAX_FEE_TAKER_BPS <= BPS_DENOMINATOR);
+const _: () = assert!(MAX_PRICE_IMPACT_BPS <= BPS_DENOMINATOR);
+
+
+// Swap this for a real
 // production key (and a real keypair to match) before any real deploy.
 pub const AUTHORITY: Address = address!("eaZoYS1Ej58sL64S3PtZbo7XS5euS7oTC1CzsEmP6VE");
 
-// Gates the ONE-TIME initialize_config call only — whoever controls this
-// key is the only one who can create the singleton Config account, which
-// then records its own `admin` field for every subsequent update_config
-// call. Without this gate, initialize_config would be a race: whoever's
-// transaction lands first becomes admin forever, permissionlessly, which is
-// not the intent. Same placeholder-keypair caveat as AUTHORITY above —
-// swap for the real bootstrap key (intended to be a Squads multisig vault,
-// per the chosen auth model) before any real deploy. Once Config exists,
-// this constant is never read again; all further admin checks read
-// Config.admin, not this.
+
 pub const INITIAL_CONFIG_ADMIN: Address = address!("eaZoYS1Ej58sL64S3PtZbo7XS5euS7oTC1CzsEmP6VE");

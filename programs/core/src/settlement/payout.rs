@@ -17,7 +17,7 @@ pub fn compute_payout(winning_shares: u64, total_collected: u64, all_winning_sha
 }
 
 // Tests for the pari-mutuel payout. To see the printed output:
-//   cargo test -p openstake-core --lib settlement::payout -- --nocapture
+//   cargo test -p metis-core --lib settlement::payout -- --nocapture
 #[cfg(test)]
 mod tests {
     use super::*;

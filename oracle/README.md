@@ -1,10 +1,16 @@
-# Openstake Oracle
+# metis-oracle
 
 The Oracle is a Pinocchio program that records football settlement data and
 manages the authorities allowed to create and update it. Its public interface
 is described in Rust with Shank derives; Shank extracts the program IDL.
 
 ## Build and generate the IDL
+Today, `settle_market` (in `programs/core`) checks a single hardcoded
+`constants::AUTHORITY` pubkey — a placeholder, not a real oracle. This crate
+is where a real one gets built, as a genuinely external integration rather
+than an internal module of `metis-core` (mirroring how a reference
+implementation treats external price/result oracles as separate programs it
+CPIs into, not code it owns).
 
 Install the Shank CLI once. Version `0.4.9` is required because this crate
 uses Rust edition 2024.

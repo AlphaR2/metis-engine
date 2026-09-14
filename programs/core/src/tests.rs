@@ -3,7 +3,7 @@
 // once — this is the one place that's true.
 //
 // To see the printed output:
-//   cargo test -p openstake-core --lib tests:: -- --nocapture
+//   cargo test -p metis-core --lib tests:: -- --nocapture
 
 use crate::{amm, config, settlement};
 

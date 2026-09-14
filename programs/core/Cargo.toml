@@ -1,19 +1,11 @@
 [package]
-name = "openstake-core"
+name = "metis-core"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "openstake_core"
+name = "metis_core"
 crate-type = ["cdylib", "lib"]
-
-[[bench]]
-name = "curve_bench"
-harness = false
-
-[[bench]]
-name = "settlement_bench"
-harness = false
 
 [dependencies]
 bytemuck = { version = "1.25.2", features = ["derive"] }
@@ -24,7 +16,6 @@ pinocchio-token = "0.7.0"
 solana-address = { version = "2.6.1", features = ["bytemuck", "decode"] }
 
 [dev-dependencies]
-criterion = "0.5"
 litesvm = "0.16.0"
 litesvm-utils = "0.4.0"
 proptest = "1.6"
