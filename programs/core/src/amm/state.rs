@@ -13,6 +13,17 @@ pub enum MarketStatus {
     Cancelled = 4,
 }
 
+impl MarketStatus {
+    /// Unlike oracle/'s CFootballMatchPhase::can_transition_to, this is NOT idempotent-retry-
+    /// friendly on purpose: re-settling an already-Settled market must never silently succeed a
+    /// second time (unlike an oracle score re-send, a repeat settlement is a correctness risk,
+    /// not a harmless retry). Only one transition exists today; docs/plan.md item 6 will add
+    /// Open -> Cancelled here when that work starts.
+    pub fn can_transition_to(self, next: Self) -> bool {
+        matches!((self, next), (Self::Open, Self::Settled))
+    }
+}
+
 impl TryFrom<u8> for MarketStatus {
     type Error = ProgramError;
 
@@ -150,5 +161,32 @@ mod tests {
         // treated as some valid state.
         println!("status byte 5 -> rejected (as it should be)");
         assert!(MarketStatus::try_from(5).is_err());
+    }
+
+    // Only Open -> Settled is a legal transition today. Checked exhaustively rather than
+    // spot-checked, since this is the guard settle_market's whole solvency story rests on -
+    // including the case that matters most: Settled -> Settled (re-settling) must stay rejected,
+    // unlike oracle/'s idempotent-retry-friendly equivalent.
+    #[test]
+    fn market_status_can_transition_to_is_exhaustive() {
+        let all = [
+            MarketStatus::Uninitialized,
+            MarketStatus::Open,
+            MarketStatus::Closed,
+            MarketStatus::Settled,
+            MarketStatus::Cancelled,
+        ];
+
+        for from in all {
+            for to in all {
+                let allowed = from.can_transition_to(to);
+                println!("{from:?} -> {to:?}: {allowed}");
+                assert_eq!(
+                    allowed,
+                    (from, to) == (MarketStatus::Open, MarketStatus::Settled),
+                    "unexpected transition legality for {from:?} -> {to:?}"
+                );
+            }
+        }
     }
 }

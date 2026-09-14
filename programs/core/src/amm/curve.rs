@@ -1,4 +1,4 @@
-/// MARKER --  Most important file in this entire codebase. The curve is the heart of the AMM, and this is the only place it is implemented. Every other file is just plumbing around this one formula. 
+// MARKER --  Most important file in this entire codebase. The curve is the heart of the AMM, and this is the only place it is implemented. Every other file is just plumbing around this one formula.
 
 // The market price formula. Cost of the pool = sqrt(sum of each side's
 // shares, squared). Everything below is built on this one function.

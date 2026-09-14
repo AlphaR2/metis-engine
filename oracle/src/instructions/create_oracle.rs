@@ -1,10 +1,11 @@
-use bytemuck::{CheckedBitPattern, NoUninit, Pod, Zeroable};
+use bytemuck::{CheckedBitPattern, NoUninit};
 use pinocchio::{AccountView, ProgramResult, error::ProgramError};
 
 use crate::{
-    errors::OracleError,
+    error::OracleError,
     instructions::{authority::assert_oracle_updater, football::process_create_football},
     state::MarketKind,
+    validation::{parse_prefix, require_empty, require_owned_by, require_signer},
 };
 
 #[repr(C)]
@@ -31,27 +32,17 @@ pub fn process_create_oracle(accounts: &mut [AccountView], data: &[u8]) -> Progr
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    // signer checks
-    if !creator.is_signer() {
-        return Err(OracleError::CreatorMustSign.into());
-    }
+    require_signer(creator, OracleError::CreatorMustSign)?;
     assert_oracle_updater(creator, individual_authority.first())?;
-    // account ownership checks
-    if !account_to_create.owned_by(_system_program.address()) {
-        return Err(OracleError::OracleMustBeSystemOwned.into());
-    }
+    require_owned_by(
+        account_to_create,
+        _system_program.address(),
+        OracleError::OracleMustBeSystemOwned,
+    )?;
+    require_empty(account_to_create, OracleError::OracleAlreadyInitialized)?;
 
-    // expected account state check
-    if !account_to_create.is_data_empty() {
-        return Err(OracleError::OracleAlreadyInitialized.into());
-    }
-
-    let create_args: &[u8; CreateArgs::LEN] = data
-        .get(..CreateArgs::LEN)
-        .ok_or(ProgramError::InvalidInstructionData)?
-        .try_into()
-        .map_err(|_| ProgramError::InvalidInstructionData)?;
-    let args = CreateArgs::from_bytes(&create_args);
+    let create_args = parse_prefix::<{ CreateArgs::LEN }>(data)?;
+    let args = CreateArgs::from_bytes(create_args);
 
     match args.market_kind {
         MarketKind::Football => process_create_football(accounts, &data[CreateArgs::LEN..])?,

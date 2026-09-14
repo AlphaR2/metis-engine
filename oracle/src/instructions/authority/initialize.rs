@@ -1,12 +1,17 @@
 use pinocchio::{
-    AccountView, Address, ProgramResult,
+    AccountView, ProgramResult,
     cpi::{Seed, Signer},
     error::ProgramError,
     sysvars::{Sysvar, rent::Rent},
 };
 use pinocchio_system::instructions::CreateAccount;
 
-use crate::{errors::OracleError, instructions::authority::AUTHORITY_SEED, state::OracleAuthority};
+use crate::{
+    constants::AUTHORITY_SEED,
+    error::OracleError,
+    state::OracleAuthority,
+    validation::{derive_and_check_pda, require_empty, require_owned_by, require_signer},
+};
 
 pub fn process_initialize_authority(accounts: &mut [AccountView]) -> ProgramResult {
     let [initializer, authority, _system_program, _extra @ ..] = accounts else {
@@ -14,19 +19,24 @@ pub fn process_initialize_authority(accounts: &mut [AccountView]) -> ProgramResu
     };
 
     let authority_state = OracleAuthority::hardcoded();
-    if !initializer.is_signer() || !authority_state.is_supermajority(*initializer.address()) {
+    require_signer(initializer, OracleError::UnauthorizedAuthority)?;
+    if !authority_state.is_supermajority(*initializer.address()) {
         return Err(OracleError::UnauthorizedAuthority.into());
     }
 
-    if !authority.owned_by(&pinocchio_system::ID) || !authority.is_data_empty() {
-        return Err(OracleError::OracleAlreadyInitialized.into());
-    }
+    require_owned_by(
+        authority,
+        &pinocchio_system::ID,
+        OracleError::OracleAlreadyInitialized,
+    )?;
+    require_empty(authority, OracleError::OracleAlreadyInitialized)?;
 
-    let (expected_authority, bump) = Address::derive_program_address(&[AUTHORITY_SEED], &crate::ID)
-        .ok_or(OracleError::InvalidAuthorityPda)?;
-    if expected_authority != *authority.address() {
-        return Err(OracleError::InvalidAuthorityPda.into());
-    }
+    let bump = derive_and_check_pda(
+        &[AUTHORITY_SEED],
+        &crate::ID,
+        authority.address(),
+        OracleError::InvalidAuthorityPda,
+    )?;
 
     let bump = [bump];
     let seeds = [Seed::from(AUTHORITY_SEED), Seed::from(&bump)];

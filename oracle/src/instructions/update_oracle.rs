@@ -2,9 +2,10 @@ use bytemuck::{CheckedBitPattern, NoUninit};
 use pinocchio::{AccountView, ProgramResult, error::ProgramError};
 
 use crate::{
-    errors::OracleError,
+    error::OracleError,
     instructions::{authority::assert_oracle_updater, football::process_update_football},
     state::UpdateKind,
+    validation::{parse_prefix, require_not_empty, require_owned_by, require_signer},
 };
 
 #[repr(C)]
@@ -32,35 +33,13 @@ pub fn process_update_oracle(accounts: &mut [AccountView], data: &[u8]) -> Progr
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    // signer checks
-    if !creator.is_signer() {
-        return Err(OracleError::CreatorMustSign.into());
-    }
+    require_signer(creator, OracleError::CreatorMustSign)?;
     assert_oracle_updater(creator, individual_authority.first())?;
-    // account ownership checks
-    if !account_to_create.owned_by(&crate::ID) {
-        return Err(OracleError::OracleMustBeSystemOwned.into());
-    }
+    require_owned_by(account_to_create, &crate::ID, OracleError::OracleMustBeSystemOwned)?;
+    require_not_empty(account_to_create, OracleError::OracleShouldNotBeEmpty)?;
 
-    // expected account state check
-    if account_to_create.is_data_empty() {
-        return Err(OracleError::OracleShouldNotBeEmpty.into());
-    }
-
-    let update_args: &[u8; UpdateArgs::LEN] = data
-        .get(..UpdateArgs::LEN)
-        .ok_or(ProgramError::InvalidInstructionData)?
-        .try_into()
-        .map_err(|_| ProgramError::InvalidInstructionData)?;
+    let update_args = parse_prefix::<{ UpdateArgs::LEN }>(data)?;
     let args = UpdateArgs::from_bytes(update_args);
-
-    // we already confirmed that it's not empty
-    // let stored_market_kind = unsafe { account_to_create.borrow_unchecked() }[0];
-
-    // if it's not empty and we checked that the account was created with this program, then this check isn't super necessary
-    // if stored_market_kind != MarketKind::Football as u8 {
-    //     return Err(ProgramError::InvalidInstructionData);
-    // }
 
     match args.update_kind {
         UpdateKind::Score | UpdateKind::Penalties | UpdateKind::EventState => {

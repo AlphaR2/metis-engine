@@ -1,9 +1,15 @@
-use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError};
+use pinocchio::{AccountView, ProgramResult, error::ProgramError};
 
 use crate::{
-    errors::OracleError,
-    instructions::authority::{AUTHORITY_SEED, INDIVIDUAL_AUTHORITY_SEED},
+    constants::{
+        AUTHORITY_SEED, INDIVIDUAL_AUTHORITY_DISCRIMINATOR, ORACLE_AUTHORITY_DISCRIMINATOR,
+    },
+    error::OracleError,
     state::{IndividualOAuthority, OracleAuthority},
+    validation::{
+        derive_and_check_pda, individual_authority_address, require_discriminator,
+        require_owned_by, require_signer, unpack,
+    },
 };
 
 pub fn process_remove_authority(accounts: &mut [AccountView]) -> ProgramResult {
@@ -19,39 +25,38 @@ pub fn process_remove_authority(accounts: &mut [AccountView]) -> ProgramResult {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    if !root.is_signer() {
-        return Err(OracleError::CreatorMustSign.into());
-    }
+    require_signer(root, OracleError::CreatorMustSign)?;
 
-    let (expected_authority, _) = Address::derive_program_address(&[AUTHORITY_SEED], &crate::ID)
-        .ok_or(OracleError::InvalidAuthorityPda)?;
-    if expected_authority != *authority.address() || !authority.owned_by(&crate::ID) {
-        return Err(OracleError::InvalidAuthorityPda.into());
-    }
+    derive_and_check_pda(
+        &[AUTHORITY_SEED],
+        &crate::ID,
+        authority.address(),
+        OracleError::InvalidAuthorityPda,
+    )?;
+    require_owned_by(authority, &crate::ID, OracleError::InvalidAuthorityPda)?;
 
-    let authority_state = bytemuck::checked::try_from_bytes::<OracleAuthority>(unsafe {
-        authority.borrow_unchecked()
-    })
-    .map_err(|_| OracleError::InvalidAuthority)?;
+    let authority_state = unsafe {
+        unpack::<OracleAuthority>(authority.borrow_unchecked(), OracleError::InvalidAuthority)?
+    };
+    require_discriminator(authority_state.discriminator, ORACLE_AUTHORITY_DISCRIMINATOR)?;
     if !authority_state.is_supermajority(*root.address()) {
         return Err(OracleError::UnauthorizedAuthority.into());
     }
 
-    let (expected_individual_authority, _) = Address::derive_program_address(
-        &[INDIVIDUAL_AUTHORITY_SEED, candidate.address().as_ref()],
-        &crate::ID,
-    )
-    .ok_or(OracleError::InvalidAuthorityPda)?;
-    if expected_individual_authority != *individual_authority.address()
-        || !individual_authority.owned_by(&crate::ID)
-    {
+    let (expected_individual_authority, _) =
+        individual_authority_address(candidate.address(), &crate::ID)?;
+    if expected_individual_authority != *individual_authority.address() {
         return Err(OracleError::InvalidAuthorityPda.into());
     }
+    require_owned_by(individual_authority, &crate::ID, OracleError::InvalidAuthorityPda)?;
 
-    let individual_state = bytemuck::checked::try_from_bytes::<IndividualOAuthority>(unsafe {
-        individual_authority.borrow_unchecked()
-    })
-    .map_err(|_| OracleError::InvalidAuthority)?;
+    let individual_state = unsafe {
+        unpack::<IndividualOAuthority>(
+            individual_authority.borrow_unchecked(),
+            OracleError::InvalidAuthority,
+        )?
+    };
+    require_discriminator(individual_state.discriminator, INDIVIDUAL_AUTHORITY_DISCRIMINATOR)?;
     if individual_state.address != candidate.address().to_bytes() {
         return Err(OracleError::InvalidAuthority.into());
     }

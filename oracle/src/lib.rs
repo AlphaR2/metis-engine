@@ -1,16 +1,18 @@
+
 #![allow(unexpected_cfgs)]
+
 use pinocchio::{
     AccountView, Address, ProgramResult, address::declare_id, entrypoint, error::ProgramError,
 };
 
 use crate::instructions::POracle;
 
-use pinocchio_log::log;
-
-mod errors;
+mod constants;
+mod error;
 mod instructions;
 mod state;
 mod tests;
+mod validation;
 
 entrypoint!(process_instruction);
 
@@ -36,7 +38,6 @@ pub fn process_instruction(
         POracle::AttestAuthority => instructions::process_attest_authority(accounts),
         POracle::RemoveAuthority => instructions::process_remove_authority(accounts),
 
-        _ => return Err(ProgramError::InvalidInstructionData),
+        _ => Err(ProgramError::InvalidInstructionData),
     }
-    // Ok(())
 }

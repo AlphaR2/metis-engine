@@ -13,6 +13,7 @@ use crate::{
         CONFIG_SEED, INITIAL_CONFIG_ADMIN, MAX_FEE_PRIMARY_BPS, MAX_OUTCOMES,
         MAX_PRICE_IMPACT_BPS, MAX_VIRTUAL_LIQUIDITY_MULTIPLE, MIN_SEED,
     },
+    error::MetisError,
     validation,
 };
 
@@ -50,11 +51,15 @@ pub fn process_initialize_config(accounts: &mut [AccountView], data: &[u8]) -> P
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    validation::require_signer(authority)?;
-    validation::require_writable(authority)?;
-    validation::require_writable(config)?;
+    validation::require_signer(authority, MetisError::AuthorityMustSign)?;
+    validation::require_writable(authority, MetisError::AccountNotWritable)?;
+    validation::require_writable(config, MetisError::AccountNotWritable)?;
 
-    validation::require_addresses_match(authority.address(), &INITIAL_CONFIG_ADMIN)?;
+    validation::require_addresses_match(
+        authority.address(),
+        &INITIAL_CONFIG_ADMIN,
+        MetisError::WrongAccountReference,
+    )?;
 
     if system_program.address() != &pinocchio_system::ID {
         return Err(ProgramError::IncorrectProgramId);
@@ -91,7 +96,7 @@ pub fn process_initialize_config(accounts: &mut [AccountView], data: &[u8]) -> P
     let (config_pda, config_bump) = Address::derive_program_address(&config_seeds, &crate::ID)
         .ok_or(ProgramError::InvalidSeeds)?;
 
-    validation::require_addresses_match(config.address(), &config_pda)?;
+    validation::require_addresses_match(config.address(), &config_pda, MetisError::InvalidPda)?;
 
     let rent = Rent::get()?;
     let bump_seed = [config_bump];

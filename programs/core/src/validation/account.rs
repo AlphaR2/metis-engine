@@ -7,30 +7,39 @@ use pinocchio::{AccountView, Address, error::ProgramError};
 
 use crate::error::MetisError;
 
-pub fn require_signer(account: &AccountView) -> Result<(), ProgramError> {
+// Each primitive takes an explicit MetisError rather than returning a generic ProgramError -
+// mirrors oracle/'s validation.rs, which already gave nearly every check its own domain-specific
+// code (CreatorMustSign, OracleAlreadyInitialized, ...). A client parsing the returned error code
+// gets a meaningful reason, not one shared "invalid account data" for every kind of failure.
+
+pub fn require_signer(account: &AccountView, err: MetisError) -> Result<(), ProgramError> {
     if !account.is_signer() {
-        return Err(ProgramError::MissingRequiredSignature);
+        return Err(err.into());
     }
     Ok(())
 }
 
-pub fn require_writable(account: &AccountView) -> Result<(), ProgramError> {
+pub fn require_writable(account: &AccountView, err: MetisError) -> Result<(), ProgramError> {
     if !account.is_writable() {
-        return Err(ProgramError::InvalidAccountData);
+        return Err(err.into());
     }
     Ok(())
 }
 
-pub fn require_not_empty(account: &AccountView) -> Result<(), ProgramError> {
+pub fn require_not_empty(account: &AccountView, err: MetisError) -> Result<(), ProgramError> {
     if account.is_data_empty() {
-        return Err(ProgramError::UninitializedAccount);
+        return Err(err.into());
     }
     Ok(())
 }
 
-pub fn require_owned_by(account: &AccountView, program_id: &Address) -> Result<(), ProgramError> {
+pub fn require_owned_by(
+    account: &AccountView,
+    program_id: &Address,
+    err: MetisError,
+) -> Result<(), ProgramError> {
     if !account.owned_by(program_id) {
-        return Err(ProgramError::IncorrectProgramId);
+        return Err(err.into());
     }
     Ok(())
 }
@@ -40,15 +49,18 @@ pub fn require_initialized_and_owned(
     account: &AccountView,
     program_id: &Address,
     must_be_writable: bool,
+    err: MetisError,
 ) -> Result<(), ProgramError> {
     if must_be_writable {
-        require_writable(account)?;
+        require_writable(account, err)?;
     }
-    require_not_empty(account)?;
-    require_owned_by(account, program_id)?;
+    require_not_empty(account, err)?;
+    require_owned_by(account, program_id, err)?;
     Ok(())
 }
 
+/// The one check that keeps a single, always-reused meaning ("the account read back wasn't the
+/// type we expected") regardless of call site - no per-call-site variant needed.
 pub fn require_discriminator(actual: [u8; 8], expected: [u8; 8]) -> Result<(), ProgramError> {
     if actual != expected {
         return Err(MetisError::DiscriminatorMismatch.into());
@@ -56,9 +68,13 @@ pub fn require_discriminator(actual: [u8; 8], expected: [u8; 8]) -> Result<(), P
     Ok(())
 }
 
-pub fn require_addresses_match(actual: &Address, expected: &Address) -> Result<(), ProgramError> {
+pub fn require_addresses_match(
+    actual: &Address,
+    expected: &Address,
+    err: MetisError,
+) -> Result<(), ProgramError> {
     if actual != expected {
-        return Err(ProgramError::InvalidAccountData);
+        return Err(err.into());
     }
     Ok(())
 }
@@ -101,10 +117,10 @@ mod tests {
         let a = crate::constants::AUTHORITY;
         let b = crate::constants::AUTHORITY;
         println!("same address {a} -> accepted");
-        assert!(require_addresses_match(&a, &b).is_ok());
+        assert!(require_addresses_match(&a, &b, MetisError::WrongAccountReference).is_ok());
 
         let zeroed = Address::default();
         println!("different address ({a} vs all-zero) -> rejected");
-        assert!(require_addresses_match(&a, &zeroed).is_err());
+        assert!(require_addresses_match(&a, &zeroed, MetisError::WrongAccountReference).is_err());
     }
 }

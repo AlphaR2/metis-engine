@@ -1,5 +1,5 @@
 use pinocchio::{
-    AccountView, Address, ProgramResult,
+    AccountView, ProgramResult,
     cpi::{Seed, Signer},
     error::ProgramError,
     sysvars::{Sysvar, rent::Rent},
@@ -7,7 +7,12 @@ use pinocchio::{
 
 use pinocchio_system::instructions::CreateAccount;
 
-use crate::{errors::OracleError, instructions::football::FootballSettled};
+use crate::{
+    constants::{FOOTBALL_SEED, FOOTBALL_SETTLED_DISCRIMINATOR, SETTLED_SEED},
+    error::OracleError,
+    instructions::football::FootballSettled,
+    validation::{derive_and_check_pda, require_discriminator, unpack},
+};
 
 pub fn process_create_football(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     // load accounts
@@ -20,44 +25,41 @@ pub fn process_create_football(accounts: &mut [AccountView], data: &[u8]) -> Pro
         .get(..football_length)
         .ok_or(OracleError::InvalidFootballData)?;
 
-    let received_data_serialised =
-        bytemuck::checked::try_from_bytes::<FootballSettled>(football_data)
-            .map_err(|_| OracleError::InvalidFootballData)?;
+    let received_data_serialised = unpack::<FootballSettled>(
+        football_data,
+        OracleError::InvalidFootballData,
+    )?;
+    require_discriminator(
+        received_data_serialised.discriminator,
+        FOOTBALL_SETTLED_DISCRIMINATOR,
+    )?;
 
-    // deriving bump onchain
-    let bump = {
-        let pda_seeds: [&[u8]; 3] = [
-            b"football",
-            b"settled",
+    // The fixture Merkle root is immutable and doubles as this PDA's identity.
+    let bump = derive_and_check_pda(
+        &[
+            FOOTBALL_SEED,
+            SETTLED_SEED,
             &received_data_serialised.fixture_merkle_root,
-        ];
-        let try_create_account = Address::derive_program_address(&pda_seeds, &crate::ID)
-            .ok_or(OracleError::InvalidOraclePda)?;
+        ],
+        &crate::ID,
+        account_to_create.address(),
+        OracleError::InvalidOraclePda,
+    )?;
 
-        // assert derived onchain and offchain accounts are equal
-        if !try_create_account.0.eq(account_to_create.address()) {
-            return Err(OracleError::InvalidOraclePda.into());
-        }
-
-        &[try_create_account.1]
-    };
-
+    let bump = [bump];
     let seeds = [
-        Seed::from(b"football"),
-        Seed::from(b"settled"),
+        Seed::from(FOOTBALL_SEED),
+        Seed::from(SETTLED_SEED),
         Seed::from(&received_data_serialised.fixture_merkle_root),
-        Seed::from(bump),
+        Seed::from(&bump),
     ];
 
     let signer = Signer::from(&seeds);
 
     let rent = Rent::get()?;
     let rent_exempt = rent
-        .try_minimum_balance(football_length as usize)
+        .try_minimum_balance(football_length)
         .map_err(|_| OracleError::RentCalculationFailed)?;
-
-    // log!("size ser is: {}", size);
-    // The fixture Merkle root is immutable and doubles as this PDA's identity.
 
     CreateAccount {
         from: creator,
@@ -68,9 +70,7 @@ pub fn process_create_football(accounts: &mut [AccountView], data: &[u8]) -> Pro
     }
     .invoke_signed(&[signer])?;
 
-    // write to said account
-
     let borrowed_data = unsafe { account_to_create.borrow_unchecked_mut() };
-    borrowed_data.copy_from_slice(&mut football_data.to_vec());
+    borrowed_data.copy_from_slice(football_data);
     Ok(())
 }

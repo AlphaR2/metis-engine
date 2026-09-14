@@ -61,4 +61,20 @@ fn main() {
         "pub const UPDATE_CONFIG:     [u8; 8] = {:?};",
         discriminator("global:update_config")
     );
+
+    // oracle/ account discriminators - paste into oracle/src/constants.rs
+    println!();
+    println!("// ── Oracle account discriminators ────────────────────────────────────");
+    println!(
+        "pub const FOOTBALL_SETTLED_DISCRIMINATOR:   [u8; 8] = {:?};",
+        discriminator("account:FootballSettled")
+    );
+    println!(
+        "pub const ORACLE_AUTHORITY_DISCRIMINATOR:   [u8; 8] = {:?};",
+        discriminator("account:OracleAuthority")
+    );
+    println!(
+        "pub const INDIVIDUAL_AUTHORITY_DISCRIMINATOR: [u8; 8] = {:?};",
+        discriminator("account:IndividualOAuthority")
+    );
 }

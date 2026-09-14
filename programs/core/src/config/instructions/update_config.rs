@@ -7,6 +7,7 @@ use crate::{
         MAX_FEE_PRIMARY_BPS, MAX_OUTCOMES, MAX_PRICE_IMPACT_BPS, MAX_VIRTUAL_LIQUIDITY_MULTIPLE,
         MIN_SEED,
     },
+    error::MetisError,
     validation,
 };
 
@@ -48,15 +49,24 @@ pub fn process_update_config(accounts: &mut [AccountView], data: &[u8]) -> Progr
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    validation::require_signer(admin)?;
-    validation::require_initialized_and_owned(config, &crate::ID, true)?;
+    validation::require_signer(admin, MetisError::AuthorityMustSign)?;
+    validation::require_initialized_and_owned(
+        config,
+        &crate::ID,
+        true,
+        MetisError::InvalidConfigAccount,
+    )?;
 
     let mut config_data = config.try_borrow_mut()?;
     let config_state: &mut Config = from_bytes_mut(&mut config_data);
 
     validation::require_discriminator(config_state.discriminator, CONFIG_DISCRIMINATOR)?;
     // validate admin to update mint
-    validation::require_addresses_match(admin.address(), &config_state.admin)?;
+    validation::require_addresses_match(
+        admin.address(),
+        &config_state.admin,
+        MetisError::WrongAccountReference,
+    )?;
 
     // Same real per-field ceilings as initialize_config
     if args.fee_bps > MAX_FEE_PRIMARY_BPS

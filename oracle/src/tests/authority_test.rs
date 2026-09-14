@@ -8,11 +8,9 @@ pub mod authority {
     use solana_transaction::Transaction;
 
     use crate::{
-        instructions::{
-            POracle,
-            authority::{AUTHORITY_SEED, INDIVIDUAL_AUTHORITY_SEED},
-        },
-        state::{IndividualOAuthority, OracleAuthority, SUPERMAJORITIES},
+        constants::{AUTHORITY_SEED, INDIVIDUAL_AUTHORITY_SEED, SUPERMAJORITIES},
+        instructions::POracle,
+        state::{IndividualOAuthority, OracleAuthority},
         tests::tests::program_id,
     };
 

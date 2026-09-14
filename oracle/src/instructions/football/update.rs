@@ -7,9 +7,11 @@ use pinocchio::{
 };
 
 use crate::{
-    errors::OracleError,
+    constants::FOOTBALL_SETTLED_DISCRIMINATOR,
+    error::OracleError,
     instructions::football::{CFootballMatchPhase, FootballSettled},
     state::UpdateKind,
+    validation::{parse_prefix, require_discriminator, unpack_mut},
 };
 
 #[repr(C)]
@@ -32,25 +34,22 @@ pub fn process_update_football(
     update_kind: UpdateKind,
     data: &[u8],
 ) -> ProgramResult {
-    let [creator, account_to_create, _system_program, _extra @ ..] = accounts else {
+    // creator's signature/authority was already checked by process_update_oracle. 
+    let [_creator, account_to_create, _system_program, _extra @ ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    // assert that data shape is indeed Football
-    let update_args_len = UpdateFootballArgs::LEN;
-    let update_args: &[u8; UpdateFootballArgs::LEN] = data
-        .get(..update_args_len)
-        .ok_or(ProgramError::InvalidInstructionData)?
-        .try_into()
-        .map_err(|_| ProgramError::InvalidInstructionData)?;
-
+    let update_args = parse_prefix::<{ UpdateFootballArgs::LEN }>(data)?;
     let update_data = UpdateFootballArgs::from_bytes(update_args);
 
-    let borrowed_oracle_account_data = unsafe {
-        bytemuck::checked::from_bytes_mut::<FootballSettled>(
-            account_to_create.borrow_unchecked_mut(),
-        )
-    };
+    let borrowed_oracle_account_data = unpack_mut::<FootballSettled>(
+        unsafe { account_to_create.borrow_unchecked_mut() },
+        OracleError::InvalidFootballData,
+    )?;
+    require_discriminator(
+        borrowed_oracle_account_data.discriminator,
+        FOOTBALL_SETTLED_DISCRIMINATOR,
+    )?;
 
     if update_kind == UpdateKind::Score {
         borrowed_oracle_account_data.score = update_data.score;

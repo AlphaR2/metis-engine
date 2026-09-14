@@ -4,19 +4,17 @@ use pinocchio::{
     sysvars::{Sysvar, clock::Clock},
 };
 
-use crate::errors::OracleError;
+use crate::{
+    constants::{INDIVIDUAL_AUTHORITY_DISCRIMINATOR, ORACLE_AUTHORITY_DISCRIMINATOR, SUPERMAJORITIES},
+    error::OracleError,
+};
 
 #[repr(C)]
 #[derive(NoUninit, CheckedBitPattern, Clone, Copy)]
 pub struct OracleAuthority {
     pub supermajority: [[u8; 32]; 3],
+    pub discriminator: [u8; 8],
 }
-
-pub const SUPERMAJORITIES: [[u8; 32]; 3] = [
-    Address::from_str_const("UPDTR3Mmf4qQatb5qy8rE7aEw34Jq2AUJknEgbTuw8B").to_bytes(),
-    Address::from_str_const("UPdtRERKVQhyEEFmxTUmmezz1BStBS1wiXn1h74bhRG").to_bytes(),
-    Address::from_str_const("upDTrFkAvEEk2N9JoxbeY6jg1KHJNzu8BAqdf7f2xVc").to_bytes(),
-];
 
 impl OracleAuthority {
     pub const LEN: usize = core::mem::size_of::<Self>();
@@ -24,13 +22,16 @@ impl OracleAuthority {
     pub fn hardcoded() -> Self {
         Self {
             supermajority: SUPERMAJORITIES,
+            discriminator: ORACLE_AUTHORITY_DISCRIMINATOR,
         }
     }
 
+    #[allow(dead_code)]
     pub fn new(supermajority: [Address; 3]) -> Self {
         let [first, second, third] = supermajority;
         Self {
             supermajority: [first.to_bytes(), second.to_bytes(), third.to_bytes()],
+            discriminator: ORACLE_AUTHORITY_DISCRIMINATOR,
         }
     }
 
@@ -45,6 +46,7 @@ pub struct IndividualOAuthority {
     pub address: [u8; 32], // address
     pub attesters: [[u8; 32]; 2],
     pub is_attest_complete: [u8; 8], // i64 time
+    pub discriminator: [u8; 8],
 }
 
 impl IndividualOAuthority {
@@ -53,6 +55,7 @@ impl IndividualOAuthority {
             address: address.to_bytes(),
             attesters: [[0; 32]; 2],
             is_attest_complete: 0u64.to_le_bytes(),
+            discriminator: INDIVIDUAL_AUTHORITY_DISCRIMINATOR,
         }
     }
 
@@ -109,7 +112,7 @@ impl IndividualOAuthority {
 #[cfg(test)]
 mod tests {
     use super::{IndividualOAuthority, OracleAuthority};
-    use crate::errors::OracleError;
+    use crate::error::OracleError;
     use pinocchio::{Address, error::ProgramError};
 
     fn authority(byte: u8) -> Address {

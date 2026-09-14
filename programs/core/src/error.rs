@@ -49,6 +49,42 @@ pub enum MetisError {
     /// impact ceiling. Never an inversion: this checks the trade that
     /// already happened, it never solves for a deposit size.
     PriceImpactExceeded = 11,
+
+    /// A bettor-role account (place_bet's or claim's `bettor`) didn't sign.
+    BettorMustSign = 12,
+
+    /// initialize_market's `creator` didn't sign.
+    CreatorMustSign = 13,
+
+    /// A protocol-authority-role account didn't sign: settle_market's
+    /// `authority`, initialize_config's `authority`, or update_config's
+    /// `admin` — all the same "the one key allowed to do this" role.
+    AuthorityMustSign = 14,
+
+    /// An account required to be writable wasn't. Purely structural — which
+    /// specific account failed is visible from the instruction's own account
+    /// list, so this is reused across every require_writable call site
+    /// rather than growing one variant per account.
+    AccountNotWritable = 15,
+
+    /// The `market` account failed its initialized-and-owned-by-this-program
+    /// check (place_bet, claim, settle_market).
+    InvalidMarketAccount = 16,
+
+    /// The `config` account failed its initialized-and-owned-by-this-program
+    /// check (place_bet, initialize_market, update_config).
+    InvalidConfigAccount = 17,
+
+    /// A derived PDA (config/market/vault/outcome-mint) didn't match the
+    /// account actually passed in.
+    InvalidPda = 18,
+
+    /// An account didn't match a value stored on another account it's
+    /// supposed to correspond to — e.g. the vault passed in isn't the one
+    /// Market.vault recorded, or an ATA's mint/owner doesn't match what
+    /// claim expects. Distinct from InvalidPda: this is a stored-reference
+    /// check, not a fresh derivation.
+    WrongAccountReference = 19,
 }
 
 impl From<MetisError> for ProgramError {

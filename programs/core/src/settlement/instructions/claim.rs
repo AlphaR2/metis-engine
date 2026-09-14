@@ -46,13 +46,18 @@ pub fn process_claim(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResul
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    validation::require_signer(bettor)?;
-    validation::require_writable(vault)?;
-    validation::require_writable(bettor_quote_ata)?;
+    validation::require_signer(bettor, MetisError::BettorMustSign)?;
+    validation::require_writable(vault, MetisError::AccountNotWritable)?;
+    validation::require_writable(bettor_quote_ata, MetisError::AccountNotWritable)?;
     // Burning reduces both the holder's balance and the mint's supply.
-    validation::require_writable(winning_mint)?;
-    validation::require_writable(bettor_winning_ata)?;
-    validation::require_initialized_and_owned(market, &crate::ID, false)?;
+    validation::require_writable(winning_mint, MetisError::AccountNotWritable)?;
+    validation::require_writable(bettor_winning_ata, MetisError::AccountNotWritable)?;
+    validation::require_initialized_and_owned(
+        market,
+        &crate::ID,
+        false,
+        MetisError::InvalidMarketAccount,
+    )?;
 
     if token_program.address() != &pinocchio_token::ID {
         return Err(ProgramError::IncorrectProgramId);
@@ -68,8 +73,16 @@ pub fn process_claim(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResul
             return Err(MetisError::MarketNotSettled.into());
         }
 
-        validation::require_addresses_match(vault.address(), &market_state.vault)?;
-        validation::require_addresses_match(quote_mint.address(), &market_state.quote_mint)?;
+        validation::require_addresses_match(
+            vault.address(),
+            &market_state.vault,
+            MetisError::WrongAccountReference,
+        )?;
+        validation::require_addresses_match(
+            quote_mint.address(),
+            &market_state.quote_mint,
+            MetisError::WrongAccountReference,
+        )?;
 
         let winning_outcome = market_state.winning_outcome as usize;
 
@@ -96,15 +109,23 @@ pub fn process_claim(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResul
     let mint_seeds: [&[u8]; 3] = [OUTCOME_MINT_SEED, market.address().as_ref(), &index_byte];
     let (mint_pda, _) = Address::derive_program_address(&mint_seeds, &crate::ID)
         .ok_or(ProgramError::InvalidSeeds)?;
-    validation::require_addresses_match(winning_mint.address(), &mint_pda)?;
+    validation::require_addresses_match(winning_mint.address(), &mint_pda, MetisError::InvalidPda)?;
 
     // How many winning shares this person holds. Their whole balance is cashed
     // in at once - there's no reason to leave any behind, since after
     // settlement the token has no future value beyond this payout.
     let winning_shares = {
         let ata = Account::from_account_view(bettor_winning_ata)?;
-        validation::require_addresses_match(ata.mint(), winning_mint.address())?;
-        validation::require_addresses_match(ata.owner(), bettor.address())?;
+        validation::require_addresses_match(
+            ata.mint(),
+            winning_mint.address(),
+            MetisError::WrongAccountReference,
+        )?;
+        validation::require_addresses_match(
+            ata.owner(),
+            bettor.address(),
+            MetisError::WrongAccountReference,
+        )?;
         ata.amount()
     };
 

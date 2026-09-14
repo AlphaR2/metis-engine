@@ -17,11 +17,8 @@ mod tests {
     use crate::tests::create_test::create_oracle::create_oracle_function;
     use crate::tests::update_test::update_oracle::update_oracle_function;
     use crate::{
-        instructions::{
-            POracle,
-            authority::{AUTHORITY_SEED, INDIVIDUAL_AUTHORITY_SEED},
-            football::FootballSettled,
-        },
+        constants::{AUTHORITY_SEED, FOOTBALL_SEED, INDIVIDUAL_AUTHORITY_SEED, SETTLED_SEED},
+        instructions::{POracle, football::FootballSettled},
         state::{IndividualOAuthority, MarketKind, OracleAuthority},
     };
 
@@ -29,7 +26,6 @@ mod tests {
         pub creator: Keypair,
         pub oracle: Pubkey,
         pub system_program: Pubkey,
-        pub authority: Pubkey,
         pub individual_authority: Pubkey,
     }
 
@@ -53,7 +49,7 @@ mod tests {
             .expect("Failed to add program");
 
         let (oracle, _) = solana_address::Address::find_program_address(
-            &[b"football", b"settled", &FIXTURE_MERKLE_ROOT],
+            &[FOOTBALL_SEED, SETTLED_SEED, &FIXTURE_MERKLE_ROOT],
             &crate::ID,
         );
         let (authority, _) =
@@ -97,7 +93,6 @@ mod tests {
             system_program: "11111111111111111111111111111111"
                 .parse()
                 .expect("valid system program id"),
-            authority,
             individual_authority,
         };
 
@@ -148,7 +143,7 @@ mod tests {
             data: [(POracle::CreateOracle as u8)]
                 .into_iter()
                 .chain([MarketKind::Football as u8])
-                .chain(football.to_bytes().iter().copied())
+                .chain(football.as_bytes().iter().copied())
                 .collect(),
         };
         let transaction = Transaction::new(

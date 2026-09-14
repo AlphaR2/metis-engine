@@ -71,6 +71,22 @@
                 },
                 "kind": "arrayTypeNode"
               }
+            },
+            {
+              "kind": "structFieldTypeNode",
+              "name": "discriminator",
+              "type": {
+                "count": {
+                  "kind": "fixedCountNode",
+                  "value": 8
+                },
+                "item": {
+                  "endian": "le",
+                  "format": "u8",
+                  "kind": "numberTypeNode"
+                },
+                "kind": "arrayTypeNode"
+              }
             }
           ],
           "kind": "structTypeNode"
@@ -559,7 +575,7 @@
       }
     ],
     "kind": "programNode",
-    "name": "oracle",
+    "name": "metisOracle",
     "pdas": [],
     "publicKey": "PorC1q7btDTY3jyrNxCgieXU5a4nGzhchjjnThYM3un",
     "version": "0.1.0"

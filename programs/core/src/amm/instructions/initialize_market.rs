@@ -103,15 +103,15 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
     let creator_atas = [creator_ata_0, creator_ata_1];
 
     // The creator signs and pays for everything created here.
-    validation::require_signer(creator)?;
-    validation::require_writable(creator)?;
-    validation::require_writable(market)?;
-    validation::require_writable(vault)?;
-    validation::require_writable(creator_quote_ata)?;
+    validation::require_signer(creator, MetisError::CreatorMustSign)?;
+    validation::require_writable(creator, MetisError::AccountNotWritable)?;
+    validation::require_writable(market, MetisError::AccountNotWritable)?;
+    validation::require_writable(vault, MetisError::AccountNotWritable)?;
+    validation::require_writable(creator_quote_ata, MetisError::AccountNotWritable)?;
     // Mints get created and minted from; the ATAs get created and credited.
     for i in 0..MAX_OUTCOMES {
-        validation::require_writable(outcome_mints[i])?;
-        validation::require_writable(creator_atas[i])?;
+        validation::require_writable(outcome_mints[i], MetisError::AccountNotWritable)?;
+        validation::require_writable(creator_atas[i], MetisError::AccountNotWritable)?;
     }
 
     // Make sure each "program" account really is the program we think it is,
@@ -132,8 +132,13 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
     let (config_pda, _) = Address::derive_program_address(&config_seeds, &crate::ID)
         .ok_or(ProgramError::InvalidSeeds)?;
 
-    validation::require_addresses_match(config.address(), &config_pda)?;
-    validation::require_initialized_and_owned(config, &crate::ID, false)?;
+    validation::require_addresses_match(config.address(), &config_pda, MetisError::InvalidPda)?;
+    validation::require_initialized_and_owned(
+        config,
+        &crate::ID,
+        false,
+        MetisError::InvalidConfigAccount,
+    )?;
 
     // Read the three settings this instruction needs, then drop the borrow.
     //   market_init_fee - what the creator stakes to open the market
@@ -155,7 +160,11 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
 
     // Anyone can create a market, so without this check a creator could price
     // their market in a worthless token they minted themselves.
-    validation::require_addresses_match(quote_mint.address(), &cfg_quote_mint)?;
+    validation::require_addresses_match(
+        quote_mint.address(),
+        &cfg_quote_mint,
+        MetisError::WrongAccountReference,
+    )?;
 
     // Outcomes must be at least 2: a one-outcome market has a guaranteed
     // winner and nothing to price. The upper bound is whichever is stricter,
@@ -212,13 +221,13 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
     let market_seeds: [&[u8]; 3] = [MARKET_SEED, creator.address().as_ref(), &nonce_bytes];
     let (market_pda, market_bump) = Address::derive_program_address(&market_seeds, &crate::ID)
         .ok_or(ProgramError::InvalidSeeds)?;
-    validation::require_addresses_match(market.address(), &market_pda)?;
+    validation::require_addresses_match(market.address(), &market_pda, MetisError::InvalidPda)?;
 
     // Vault PDA: [vault, market]
     let vault_seeds: [&[u8]; 2] = [VAULT_SEED, market.address().as_ref()];
     let (vault_pda, vault_bump) = Address::derive_program_address(&vault_seeds, &crate::ID)
         .ok_or(ProgramError::InvalidSeeds)?;
-    validation::require_addresses_match(vault.address(), &vault_pda)?;
+    validation::require_addresses_match(vault.address(), &vault_pda, MetisError::InvalidPda)?;
 
     let rent = Rent::get()?;
     let market_bump_seed = [market_bump];
@@ -313,7 +322,7 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
         let (mint_pda, mint_bump) = Address::derive_program_address(&mint_seeds, &crate::ID)
             .ok_or(ProgramError::InvalidSeeds)?;
 
-        validation::require_addresses_match(outcome_mint.address(), &mint_pda)?;
+        validation::require_addresses_match(outcome_mint.address(), &mint_pda, MetisError::InvalidPda)?;
 
         let mint_bump_seed = [mint_bump];
 

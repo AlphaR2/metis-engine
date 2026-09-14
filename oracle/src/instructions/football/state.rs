@@ -1,11 +1,13 @@
-use bytemuck::{CheckedBitPattern, NoUninit, Pod, Zeroable};
-// use pack1::U32LE;
-use pinocchio::{
-    ProgramResult,
-    sysvars::{Sysvar, clock::Clock},
-};
+use bytemuck::{CheckedBitPattern, NoUninit};
+use pinocchio::ProgramResult;
+#[cfg(target_os = "solana")]
+use pinocchio::sysvars::{Sysvar, clock::Clock};
 
-use crate::{errors::OracleError, state::MarketKind};
+use crate::{
+    constants::{FOOTBALL_SETTLED_DISCRIMINATOR, SCORE_NIBBLE_MASK, SCORE_NIBBLE_MAX},
+    error::OracleError,
+    state::MarketKind,
+};
 use codama::{CodamaAccount, CodamaType};
 
 #[repr(C)]
@@ -19,9 +21,12 @@ pub struct FootballSettled {
     pub penalties: u8, // this is a bitpack - higher 4 bits is home, lower 4 bits is away
     pub status: CFootballMatchPhase, // 1 byte
     pub updated_at_unix: [u8; 8], // u64
+    pub discriminator: [u8; 8],
 }
 
-#[allow(warnings)]
+// Every non-Scheduled variant is only ever constructed by tests today (real phase transitions
+// are driven by an off-chain oracle client that isn't built yet). 
+#[allow(dead_code)]
 #[repr(u8)]
 #[derive(Clone, Copy, Default, NoUninit, CheckedBitPattern, PartialEq, CodamaType)]
 pub enum CFootballMatchPhase {
@@ -64,27 +69,26 @@ impl CFootballMatchPhase {
     }
 }
 
-#[allow(unused)]
+// Same story as CFootballMatchPhase above
+#[allow(dead_code)]
 impl FootballSettled {
     pub const LEN: usize = core::mem::size_of::<Self>();
 
     pub fn new(fixture_merkle_root: [u8; 32]) -> Self {
         let current_time = {
-            #[cfg(target = "solana")]
+            #[cfg(target_os = "solana")]
             {
                 let clock = Clock::get().expect("could  not get time");
                 let current_time = clock.unix_timestamp as u64;
                 current_time
             }
 
-            #[cfg(not(target = "solana"))]
+            #[cfg(not(target_os = "solana"))]
             {
-                let time = std::time::SystemTime::now();
-                let current_time = time
+                std::time::SystemTime::now()
                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
                     .expect("time went backwards")
-                    .as_secs();
-                current_time
+                    .as_secs()
             }
         };
 
@@ -95,17 +99,14 @@ impl FootballSettled {
             penalties: 0x00,
             status: CFootballMatchPhase::Scheduled,
             updated_at_unix: current_time.to_le_bytes(),
+            discriminator: FOOTBALL_SETTLED_DISCRIMINATOR,
         }
     }
 
-    // #[inline]
-    // pub fn to_bytes(&self) -> &[u8; Self::LEN] {
-    //     let bytes = bytemuck::cast_ref(self);
-    //     bytes
-    // }
-
+    // clippy::wrong_self_convention: a `to_*` method on a Copy type is expected to consume
+    // self by value; this one just borrows, so it's named as_bytes instead.
     #[inline]
-    pub fn to_bytes(&self) -> &[u8; Self::LEN] {
+    pub fn as_bytes(&self) -> &[u8; Self::LEN] {
         bytemuck::bytes_of(self).try_into().unwrap()
     }
 
@@ -128,18 +129,16 @@ impl FootballSettled {
 
     #[inline]
     pub fn set_scores(&mut self, home: u8, away: u8) {
-        let home_score = home.min(15);
-        let away_score = away.min(15);
-        // prevent overflow bleeding
-        self.score = ((home & 0x0F) << 4) | (away & 0x0F);
+        let home_score = home.min(SCORE_NIBBLE_MAX);
+        let away_score = away.min(SCORE_NIBBLE_MAX);
+        self.score = (home_score << 4) | (away_score & SCORE_NIBBLE_MASK);
     }
 
     #[inline]
     pub fn set_penalties(&mut self, home: u8, away: u8) {
-        let home_score = home.min(15);
-        let away_score = away.min(15);
-        // prevent overflow bleeding
-        self.penalties = ((home & 0x0F) << 4) | (away & 0x0F);
+        let home_score = home.min(SCORE_NIBBLE_MAX);
+        let away_score = away.min(SCORE_NIBBLE_MAX);
+        self.penalties = (home_score << 4) | (away_score & SCORE_NIBBLE_MASK);
     }
 
     #[inline]
@@ -152,43 +151,10 @@ impl FootballSettled {
         Ok(())
     }
 
-    // AND
-    // 0000_1111
-    // 0000_0011 == 3
-    // ||
-    // ||
-    // 0000_0011  << 4 is 0011_0000 right?
-    // 0011_0000
-
-    // AND
-    // 0000_1111
-    // 0000_0010 == 2
-    // ||
-    // ||
-    // 0000_0010
-
-    // so 0011_0000 | 000_0010
-    // ||
-    // 0011_0010
-
-    pub fn set_score(&mut self, home_score: u8, away_score: u8) {
-        let full_bytes = 0xFF; // or remove this entirely
-        // check that home max score is 15
-        // check that away max score is 15
-        let _home_score = home_score.min(15);
-        let _away_score = away_score.min(15);
-        let home_ = (full_bytes & _home_score) << 4;
-        let away_ = (full_bytes & _home_score);
-        let score = home_ | away_;
-        self.score = score
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use core::time::Duration;
-    use std::thread::sleep;
-
     use super::{CFootballMatchPhase, FootballSettled};
 
     #[test]
@@ -269,20 +235,3 @@ mod tests {
         assert!(match_state.status == CFootballMatchPhase::Scheduled);
     }
 }
-
-// #[repr(C)]
-// #[derive(Pod, Zeroable, Default, Clone, Copy)]
-// pub struct FootballSettledMatchPhase(u8);
-
-// #[allow(warnings)]
-// impl FootballSettledMatchPhase {
-//     pub const Scheduled: FootballSettledMatchPhase = FootballSettledMatchPhase(0);
-//     pub const FirstHalf: FootballSettledMatchPhase = FootballSettledMatchPhase(1);
-//     pub const HalfTime: FootballSettledMatchPhase = FootballSettledMatchPhase(2);
-//     pub const SecondHalf: FootballSettledMatchPhase = FootballSettledMatchPhase(3);
-//     pub const ExtraTimeFirstHalf: FootballSettledMatchPhase = FootballSettledMatchPhase(4);
-//     pub const ExtraTimeBreak: FootballSettledMatchPhase = FootballSettledMatchPhase(5);
-//     pub const ExtraTimeSecondHalf: FootballSettledMatchPhase = FootballSettledMatchPhase(6);
-//     pub const Penalties: FootballSettledMatchPhase = FootballSettledMatchPhase(7);
-//     pub const Finished: FootballSettledMatchPhase = FootballSettledMatchPhase(8);
-// }

@@ -50,9 +50,14 @@ pub fn process_settle_market(accounts: &mut [AccountView], data: &[u8]) -> Progr
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    validation::require_signer(authority)?;
-    validation::require_writable(market)?;
-    validation::require_initialized_and_owned(market, &crate::ID, false)?;
+    validation::require_signer(authority, MetisError::AuthorityMustSign)?;
+    validation::require_writable(market, MetisError::AccountNotWritable)?;
+    validation::require_initialized_and_owned(
+        market,
+        &crate::ID,
+        false,
+        MetisError::InvalidMarketAccount,
+    )?;
 
     let mut market_data = market.try_borrow_mut()?;
     let market_state: &mut Market = from_bytes_mut(&mut market_data);
@@ -63,10 +68,15 @@ pub fn process_settle_market(accounts: &mut [AccountView], data: &[u8]) -> Progr
     // TODO(single-point-of-failure): this single-signer check is the part
     // planned to be replaced by an oracle system
     // for now use authority
-    validation::require_addresses_match(authority.address(), &market_state.authority)?;
+    validation::require_addresses_match(
+        authority.address(),
+        &market_state.authority,
+        MetisError::WrongAccountReference,
+    )?;
 
     // Covers Uninitialized and already-Settled in one check.
-    if market_state.status != MarketStatus::Open as u8 {
+    let current_status = MarketStatus::try_from(market_state.status)?;
+    if !current_status.can_transition_to(MarketStatus::Settled) {
         return Err(MetisError::InvalidStatusTransition.into());
     }
     if args.winning_outcome >= market_state.num_outcomes {
@@ -93,8 +103,16 @@ pub fn process_settle_market(accounts: &mut [AccountView], data: &[u8]) -> Progr
     // read is pure USDC.
     {
         let vault_state = Account::from_account_view(vault)?;
-        validation::require_addresses_match(vault.address(), &market_state.vault)?;
-        validation::require_addresses_match(vault_state.mint(), &market_state.quote_mint)?;
+        validation::require_addresses_match(
+            vault.address(),
+            &market_state.vault,
+            MetisError::WrongAccountReference,
+        )?;
+        validation::require_addresses_match(
+            vault_state.mint(),
+            &market_state.quote_mint,
+            MetisError::WrongAccountReference,
+        )?;
 
         if vault_state.amount() < market_state.total_collected {
             return Err(MetisError::VaultBalanceMismatch.into());

@@ -8,16 +8,16 @@ name = "metis_core"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-bytemuck = { version = "1.25.2", features = ["derive"] }
-pinocchio = "0.11.2"
-pinocchio-associated-token-account = "0.4.0"
-pinocchio-system = "0.6.1"
-pinocchio-token = "0.7.0"
-solana-address = { version = "2.6.1", features = ["bytemuck", "decode"] }
+bytemuck = { workspace = true }
+pinocchio = { workspace = true }
+pinocchio-associated-token-account = { workspace = true }
+pinocchio-system = { workspace = true }
+pinocchio-token = { workspace = true }
+solana-address = { workspace = true }
 
 [dev-dependencies]
-litesvm = "0.16.0"
-litesvm-utils = "0.4.0"
-proptest = "1.6"
-solana-sdk = "4"
-solana-system-interface = "3"
+litesvm = { workspace = true }
+litesvm-utils = { workspace = true }
+proptest = { workspace = true }
+solana-sdk = { workspace = true }
+solana-system-interface = { workspace = true }

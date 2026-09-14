@@ -1,8 +1,7 @@
 use pinocchio::error::ProgramError;
 
-/// Program-specific errors. These values are returned to clients as
-/// `ProgramError::Custom(code)`.
 #[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OracleError {
     InvalidFootballData = 6_000,
     CreatorMustSign = 6_001,

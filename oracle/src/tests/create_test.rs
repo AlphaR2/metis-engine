@@ -32,7 +32,7 @@ pub mod create_oracle {
             data: [(POracle::CreateOracle as u8)]
                 .into_iter()
                 .chain([MarketKind::Football as u8])
-                .chain(football.to_bytes().iter().copied())
+                .chain(football.as_bytes().iter().copied())
                 .collect(),
         };
 
@@ -45,7 +45,7 @@ pub mod create_oracle {
         let oracle_account = svm
             .get_account(oracle)
             .expect("oracle account exists after create");
-        assert_eq!(oracle_account.data.as_slice(), football.to_bytes());
+        assert_eq!(oracle_account.data.as_slice(), football.as_bytes());
         // println!("{:?}", tx.logs);
         println!("create cus consumed: {:?}", tx.compute_units_consumed);
     }

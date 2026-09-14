@@ -1,11 +1,10 @@
-pub const AUTHORITY_SEED: &[u8] = b"oracle_authority";
-pub const INDIVIDUAL_AUTHORITY_SEED: &[u8] = b"individual_authority";
-
 use pinocchio::{AccountView, ProgramResult};
 
 use crate::{
-    errors::OracleError,
-    state::{IndividualOAuthority, SUPERMAJORITIES},
+    constants::{INDIVIDUAL_AUTHORITY_DISCRIMINATOR, SUPERMAJORITIES},
+    error::OracleError,
+    state::IndividualOAuthority,
+    validation::{require_discriminator, unpack},
 };
 
 /// Confirms that `caller` is either a root or an individually attested authority.
@@ -26,10 +25,11 @@ pub fn assert_oracle_updater(
         return Err(OracleError::UnauthorizedAuthority.into());
     }
 
-    let individual_state = bytemuck::checked::try_from_bytes::<IndividualOAuthority>(unsafe {
-        caller_individual_authority.borrow_unchecked()
-    })
-    .map_err(|_| OracleError::UnauthorizedAuthority)?;
+    let individual_state = unpack::<IndividualOAuthority>(
+        unsafe { caller_individual_authority.borrow_unchecked() },
+        OracleError::UnauthorizedAuthority,
+    )?;
+    require_discriminator(individual_state.discriminator, INDIVIDUAL_AUTHORITY_DISCRIMINATOR)?;
     if individual_state.address != caller.address().to_bytes()
         || !individual_state.is_attest_complete()
     {

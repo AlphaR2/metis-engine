@@ -91,15 +91,20 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
     };
 
     // The bettor signs and pays; everything they touch changes.
-    validation::require_signer(bettor)?;
-    validation::require_writable(bettor)?;
-    validation::require_writable(market)?;
-    validation::require_writable(vault)?;
-    validation::require_writable(bettor_quote_ata)?;
+    validation::require_signer(bettor, MetisError::BettorMustSign)?;
+    validation::require_writable(bettor, MetisError::AccountNotWritable)?;
+    validation::require_writable(market, MetisError::AccountNotWritable)?;
+    validation::require_writable(vault, MetisError::AccountNotWritable)?;
+    validation::require_writable(bettor_quote_ata, MetisError::AccountNotWritable)?;
     // The mint's supply grows and the bettor's account gets credited.
-    validation::require_writable(outcome_mint)?;
-    validation::require_writable(bettor_outcome_ata)?;
-    validation::require_initialized_and_owned(market, &crate::ID, false)?;
+    validation::require_writable(outcome_mint, MetisError::AccountNotWritable)?;
+    validation::require_writable(bettor_outcome_ata, MetisError::AccountNotWritable)?;
+    validation::require_initialized_and_owned(
+        market,
+        &crate::ID,
+        false,
+        MetisError::InvalidMarketAccount,
+    )?;
 
     // Make sure each "program" account really is the program we think it is,
     if system_program.address() != &pinocchio_system::ID {
@@ -117,8 +122,13 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
     let (config_pda, _) = Address::derive_program_address(&config_seeds, &crate::ID)
         .ok_or(ProgramError::InvalidSeeds)?;
 
-    validation::require_addresses_match(config.address(), &config_pda)?;
-    validation::require_initialized_and_owned(config, &crate::ID, false)?;
+    validation::require_addresses_match(config.address(), &config_pda, MetisError::InvalidPda)?;
+    validation::require_initialized_and_owned(
+        config,
+        &crate::ID,
+        false,
+        MetisError::InvalidConfigAccount,
+    )?;
 
     // get trade-cap protection params
     let max_in_bps_of_vault = {
@@ -151,8 +161,16 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
 
         // The vault and mint passed in must be the ones this market recorded,
         // or a bettor could pay into one market and be credited in another.
-        validation::require_addresses_match(vault.address(), &market_state.vault)?;
-        validation::require_addresses_match(quote_mint.address(), &market_state.quote_mint)?;
+        validation::require_addresses_match(
+            vault.address(),
+            &market_state.vault,
+            MetisError::WrongAccountReference,
+        )?;
+        validation::require_addresses_match(
+            quote_mint.address(),
+            &market_state.quote_mint,
+            MetisError::WrongAccountReference,
+        )?;
 
         let outcome_index = args.outcome_index as usize;
         if outcome_index >= market_state.num_outcomes as usize {
@@ -231,7 +249,7 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
     let mint_seeds: [&[u8]; 3] = [OUTCOME_MINT_SEED, market.address().as_ref(), &index_byte];
     let (mint_pda, _) = Address::derive_program_address(&mint_seeds, &crate::ID)
         .ok_or(ProgramError::InvalidSeeds)?;
-    validation::require_addresses_match(outcome_mint.address(), &mint_pda)?;
+    validation::require_addresses_match(outcome_mint.address(), &mint_pda, MetisError::InvalidPda)?;
 
     // Write the updated market back.
     {
