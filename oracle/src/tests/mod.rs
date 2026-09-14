@@ -1,4 +1,5 @@
 pub mod authority_test;
+pub mod close_test;
 pub mod create_test;
 pub mod update_test;
 

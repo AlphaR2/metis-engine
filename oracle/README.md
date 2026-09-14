@@ -2,35 +2,33 @@
 
 The Oracle is a Pinocchio program that records football settlement data and
 manages the authorities allowed to create and update it. Its public interface
-is described in Rust with Codama derives, not an Anchor IDL or Shank.
+is described in Rust with Shank derives; Shank extracts the program IDL.
 
 ## Build and generate the IDL
 
-`build.rs` is a Cargo build script; do not run it as `cargo build.rs`. Cargo
-runs it automatically whenever the Oracle is built. It reads the Codama
-metadata from the program source and writes the generated IDL to
-`../idl/oracle.json`.
+Install the Shank CLI once. Version `0.4.9` is required because this crate
+uses Rust edition 2024.
 
-From this directory:
+```bash
+cargo install shank-cli --version 0.4.9 --locked
+```
+
+From this directory, build the program and extract the IDL:
 
 ```bash
 cargo build-sbf
-```
-
-Verify that the IDL was generated:
-
-```bash
-ls -lh ../idl/oracle.json
+shank idl --crate-root . --out-dir ../idl
 ```
 
 The generated IDL is committed project output. Do not edit it by hand; change
-the Codama schema in `src/instructions/mod.rs` or the Codama account/type
-derives, then rebuild the program.
+the Shank instruction schema in `src/instructions/mod.rs` or the Shank
+account/type derives, then run Shank again.
 
 ## TypeScript SDK
 
-The TypeScript client lives in `../clients/typescript`. Its `codama.json`
-consumes `../../idl/oracle.json` and renders the SDK into
+The TypeScript client lives in `../clients/typescript`. Shank produces a
+standard Anchor-style IDL, which Codama can consume and render for Solana Kit.
+Its `codama.json` reads `../../idl/oracle.json` and renders the SDK into
 `oracle-sdk/src/generated`.
 
 Install its JavaScript dependencies once:
@@ -57,6 +55,13 @@ and the public enums used by the Oracle. Treat this directory as generated
 code: make interface changes in the Rust program, then regenerate it rather
 than editing TypeScript output directly.
 
+`CloseOracle` has a deliberate conditional signer: `initiator` signs only when
+creating a close proposal, while `voter` signs the later quorum votes. A static
+IDL cannot express that condition, so the generated builder marks `initiator`
+as writable. For the first close transaction, the caller must mark its
+initiator account meta as a signer; for the two vote transactions, use the
+generated `voter` signer normally.
+
 ## Full regeneration workflow
 
 When an instruction, account layout, or public enum changes:
@@ -64,6 +69,7 @@ When an instruction, account layout, or public enum changes:
 ```bash
 # 1. From oracle/
 cargo build-sbf
+shank idl --crate-root . --out-dir ../idl
 
 # 2. From clients/typescript/
 pnpm exec codama run js

@@ -1,10 +1,10 @@
 use bytemuck::{CheckedBitPattern, NoUninit};
-use codama::CodamaType;
 use pinocchio::{
     AccountView, ProgramResult,
     error::ProgramError,
     sysvars::{Sysvar, clock::Clock},
 };
+use shank::ShankType;
 
 use crate::{
     errors::OracleError,
@@ -13,7 +13,7 @@ use crate::{
 };
 
 #[repr(C)]
-#[derive(NoUninit, CheckedBitPattern, Clone, Copy, CodamaType)]
+#[derive(NoUninit, CheckedBitPattern, Clone, Copy, ShankType)]
 pub struct UpdateFootballArgs {
     pub score: u8,
     pub penalties: u8,
