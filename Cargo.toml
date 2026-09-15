@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["programs/*", "oracle", "sdk", "tools/*"]
+members = ["programs/*", "oracle", "sdk", "tools/*", "aggregator"]
 
 [workspace.dependencies]
 pinocchio = "0.11.2"
@@ -15,7 +15,12 @@ litesvm-utils = "0.4.0"
 proptest = "1.6"
 solana-sdk = "4"
 solana-system-interface = "3"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+async-trait = "0.1"
+thiserror = "2.0"
 solana-account = "4.1.0"
 solana-clock = "3.1.1"
 solana-instruction = "3.1.0"

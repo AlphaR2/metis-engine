@@ -2559,6 +2559,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "metis-aggregator"
+version = "0.1.0"
+
+[[package]]
 name = "metis-core"
 version = "0.1.0"
 dependencies = [
