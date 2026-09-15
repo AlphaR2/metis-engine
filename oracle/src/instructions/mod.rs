@@ -6,15 +6,21 @@ pub use create_oracle::*;
 pub mod update_oracle;
 pub use update_oracle::*;
 
+pub mod close_oracle;
+pub use close_oracle::*;
+
 pub mod football;
 
 pub mod authority;
 pub use authority::*;
 
-use codama::CodamaInstructions;
+use shank::ShankInstruction;
 
 use crate::{
-    instructions::football::{FootballSettled, UpdateFootballArgs},
+    instructions::{
+        close_oracle::CloseArgs,
+        football::{FootballSettled, UpdateFootballArgs},
+    },
     state::{MarketKind, UpdateKind},
 };
 
@@ -45,51 +51,61 @@ impl TryFrom<&u8> for POracle {
     }
 }
 
-/// Public instruction schema used only for Codama IDL extraction.
+/// Public instruction schema used only for Shank IDL extraction.
 ///
 /// This preserves the wire format consumed by the runtime router: a one-byte
 /// discriminator followed by the fields declared for the selected variant.
 /// The discriminants intentionally mirror `POracle`.
 #[repr(C, u8)]
 #[allow(dead_code)]
-#[derive(CodamaInstructions)]
+#[derive(ShankInstruction)]
 #[rustfmt::skip]
 pub enum OracleInstructionSchema {
-    #[codama(account(name = "creator", signer, writable))]
-    #[codama(account(name = "oracle", writable))]
-    #[codama(account(name = "system_program"))]
-    #[codama(account(name = "individual_authority", optional))]
+    #[account(0, name = "creator", sig, mut)]
+    #[account(1, name = "oracle", mut)]
+    #[account(2, name = "system_program")]
+    #[account(3, name = "individual_authority", optional)]
     CreateOracle {
         market_kind: MarketKind,
         football: FootballSettled,
     } = 0,
 
-    #[codama(account(name = "creator", signer, writable))]
-    #[codama(account(name = "oracle", writable))]
-    #[codama(account(name = "system_program"))]
-    #[codama(account(name = "individual_authority", optional))]
+    #[account(0, name = "creator", sig, mut)]
+    #[account(1, name = "oracle", mut)]
+    #[account(2, name = "system_program")]
+    #[account(3, name = "individual_authority", optional)]
     UpdateOracle {
         update_kind: UpdateKind,
         football_update: UpdateFootballArgs,
     } = 1,
 
-    #[codama(account(name = "initializer", signer, writable))]
-    #[codama(account(name = "authority", writable))]
-    #[codama(account(name = "system_program"))]
+    #[account(0, name = "initiator", mut)]
+    #[account(1, name = "voter", sig)]
+    #[account(2, name = "oracle", mut)]
+    #[account(3, name = "closer_quorum", mut)]
+    #[account(4, name = "authority")]
+    #[account(5, name = "system_program")]
+    CloseOracle {
+        close: CloseArgs,
+    } = 2,
+
+    #[account(0, name = "initializer", sig, mut)]
+    #[account(1, name = "authority", mut)]
+    #[account(2, name = "system_program")]
     InitializeAuthority = 3,
 
-    #[codama(account(name = "attester", signer, writable))]
-    #[codama(account(name = "authority"))]
-    #[codama(account(name = "candidate"))]
-    #[codama(account(name = "individual_authority", writable))]
-    #[codama(account(name = "system_program"))]
-    #[codama(account(name = "attester_individual_authority", optional))]
+    #[account(0, name = "attester", sig, mut)]
+    #[account(1, name = "authority")]
+    #[account(2, name = "candidate")]
+    #[account(3, name = "individual_authority", mut)]
+    #[account(4, name = "system_program")]
+    #[account(5, name = "attester_individual_authority", optional)]
     AttestAuthority = 4,
 
-    #[codama(account(name = "root", signer))]
-    #[codama(account(name = "authority"))]
-    #[codama(account(name = "candidate"))]
-    #[codama(account(name = "individual_authority", writable))]
-    #[codama(account(name = "recipient", writable))]
+    #[account(0, name = "root", sig)]
+    #[account(1, name = "authority")]
+    #[account(2, name = "candidate")]
+    #[account(3, name = "individual_authority", mut)]
+    #[account(4, name = "recipient", mut)]
     RemoveAuthority = 5,
 }

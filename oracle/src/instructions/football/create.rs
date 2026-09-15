@@ -61,6 +61,11 @@ pub fn process_create_football(accounts: &mut [AccountView], data: &[u8]) -> Pro
         .try_minimum_balance(football_length)
         .map_err(|_| OracleError::RentCalculationFailed)?;
 
+    // log!("size ser is: {}", size);
+    // The fixture Merkle root is immutable and doubles as this PDA's identity.
+
+    // i think creating the Account with FootballSettled::new() should be called here no?
+
     CreateAccount {
         from: creator,
         lamports: rent_exempt,

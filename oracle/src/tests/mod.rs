@@ -1,4 +1,5 @@
 pub mod authority_test;
+pub mod close_test;
 pub mod create_test;
 pub mod update_test;
 
@@ -42,7 +43,10 @@ mod tests {
         svm.airdrop(&creator.pubkey(), 10 * 1_000_000_000)
             .expect("Airdrop failed");
 
-        let program_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/deploy/oracle.so");
+        let program_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../target/deploy/metis-oracle.so"
+        );
         let program_bytes =
             std::fs::read(program_path).expect("build the SBF program first: cargo build-sbf");
         svm.add_program(program_id(), &program_bytes)

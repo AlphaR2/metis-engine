@@ -1,76 +1,59 @@
 {
-  "additionalPrograms": [],
-  "kind": "rootNode",
-  "program": {
-    "accounts": [
-      {
-        "data": {
-          "fields": [
-            {
-              "kind": "structFieldTypeNode",
-              "name": "marketKind",
-              "type": {
-                "kind": "definedTypeLinkNode",
-                "name": "marketKind"
-              }
-            },
-            {
-              "kind": "structFieldTypeNode",
-              "name": "fixtureMerkleRoot",
-              "type": {
-                "count": {
-                  "kind": "fixedCountNode",
-                  "value": 32
-                },
-                "item": {
-                  "endian": "le",
-                  "format": "u8",
-                  "kind": "numberTypeNode"
-                },
-                "kind": "arrayTypeNode"
-              }
-            },
-            {
-              "kind": "structFieldTypeNode",
-              "name": "score",
-              "type": {
-                "endian": "le",
-                "format": "u8",
-                "kind": "numberTypeNode"
-              }
-            },
-            {
-              "kind": "structFieldTypeNode",
-              "name": "penalties",
-              "type": {
-                "endian": "le",
-                "format": "u8",
-                "kind": "numberTypeNode"
-              }
-            },
-            {
-              "kind": "structFieldTypeNode",
-              "name": "status",
-              "type": {
-                "kind": "definedTypeLinkNode",
-                "name": "cfootballMatchPhase"
-              }
-            },
-            {
-              "kind": "structFieldTypeNode",
-              "name": "updatedAtUnix",
-              "type": {
-                "count": {
-                  "kind": "fixedCountNode",
-                  "value": 8
-                },
-                "item": {
-                  "endian": "le",
-                  "format": "u8",
-                  "kind": "numberTypeNode"
-                },
-                "kind": "arrayTypeNode"
-              }
+  "version": "0.1.0",
+  "name": "oracle",
+  "instructions": [
+    {
+      "name": "CreateOracle",
+      "accounts": [
+        {
+          "name": "creator",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "oracle",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "individualAuthority",
+          "isMut": false,
+          "isSigner": false,
+          "isOptional": true
+        }
+      ],
+      "args": [
+        {
+          "name": "marketKind",
+          "type": {
+            "defined": "MarketKind"
+          }
+        },
+        {
+          "name": "football",
+          "type": {
+            "defined": "FootballSettled"
+          }
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 0
+      }
+    },
+    {
+      "name": "UpdateOracle",
+      "accounts": [
+        {
+          "name": "creator",
+          "isMut": true,
+          "isSigner": true
+        },
             },
             {
               "kind": "structFieldTypeNode",
@@ -87,487 +70,350 @@
                 },
                 "kind": "arrayTypeNode"
               }
-            }
-          ],
-          "kind": "structTypeNode"
+        {
+          "name": "oracle",
+          "isMut": true,
+          "isSigner": false
         },
-        "kind": "accountNode",
-        "name": "footballSettled"
-      }
-    ],
-    "definedTypes": [
-      {
-        "kind": "definedTypeNode",
-        "name": "updateFootballArgs",
-        "type": {
-          "fields": [
-            {
-              "kind": "structFieldTypeNode",
-              "name": "score",
-              "type": {
-                "endian": "le",
-                "format": "u8",
-                "kind": "numberTypeNode"
-              }
-            },
-            {
-              "kind": "structFieldTypeNode",
-              "name": "penalties",
-              "type": {
-                "endian": "le",
-                "format": "u8",
-                "kind": "numberTypeNode"
-              }
-            },
-            {
-              "kind": "structFieldTypeNode",
-              "name": "status",
-              "type": {
-                "kind": "definedTypeLinkNode",
-                "name": "cfootballMatchPhase"
-              }
-            }
-          ],
-          "kind": "structTypeNode"
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "individualAuthority",
+          "isMut": false,
+          "isSigner": false,
+          "isOptional": true
         }
-      },
-      {
-        "kind": "definedTypeNode",
-        "name": "cfootballMatchPhase",
-        "type": {
-          "kind": "enumTypeNode",
-          "size": {
-            "endian": "le",
-            "format": "u8",
-            "kind": "numberTypeNode"
-          },
-          "variants": [
-            {
-              "discriminator": 0,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "scheduled"
-            },
-            {
-              "discriminator": 1,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "firstHalf"
-            },
-            {
-              "discriminator": 2,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "halfTime"
-            },
-            {
-              "discriminator": 3,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "secondHalf"
-            },
-            {
-              "discriminator": 4,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "extraTimeFirstHalf"
-            },
-            {
-              "discriminator": 5,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "extraTimeBreak"
-            },
-            {
-              "discriminator": 6,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "extraTimeSecondHalf"
-            },
-            {
-              "discriminator": 7,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "penalties"
-            },
-            {
-              "discriminator": 8,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "finished"
-            }
-          ]
-        }
-      },
-      {
-        "kind": "definedTypeNode",
-        "name": "marketKind",
-        "type": {
-          "kind": "enumTypeNode",
-          "size": {
-            "endian": "le",
-            "format": "u8",
-            "kind": "numberTypeNode"
-          },
-          "variants": [
-            {
-              "discriminator": 0,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "football"
-            },
-            {
-              "discriminator": 1,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "price"
-            }
-          ]
-        }
-      },
-      {
-        "kind": "definedTypeNode",
-        "name": "updateKind",
-        "type": {
-          "kind": "enumTypeNode",
-          "size": {
-            "endian": "le",
-            "format": "u8",
-            "kind": "numberTypeNode"
-          },
-          "variants": [
-            {
-              "discriminator": 0,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "score"
-            },
-            {
-              "discriminator": 1,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "penalties"
-            },
-            {
-              "discriminator": 2,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "eventState"
-            },
-            {
-              "discriminator": 3,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "price"
-            },
-            {
-              "discriminator": 4,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "confidence"
-            },
-            {
-              "discriminator": 5,
-              "kind": "enumEmptyVariantTypeNode",
-              "name": "publishTime"
-            }
-          ]
-        }
-      }
-    ],
-    "errors": [],
-    "instructions": [
-      {
-        "accounts": [
-          {
-            "isSigner": true,
-            "isWritable": true,
-            "kind": "instructionAccountNode",
-            "name": "creator"
-          },
-          {
-            "isSigner": false,
-            "isWritable": true,
-            "kind": "instructionAccountNode",
-            "name": "oracle"
-          },
-          {
-            "isSigner": false,
-            "isWritable": false,
-            "kind": "instructionAccountNode",
-            "name": "systemProgram"
-          },
-          {
-            "isOptional": true,
-            "isSigner": false,
-            "isWritable": false,
-            "kind": "instructionAccountNode",
-            "name": "individualAuthority"
+      ],
+      "args": [
+        {
+          "name": "updateKind",
+          "type": {
+            "defined": "UpdateKind"
           }
-        ],
-        "arguments": [
+        },
+        {
+          "name": "footballUpdate",
+          "type": {
+            "defined": "UpdateFootballArgs"
+          }
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 1
+      }
+    },
+    {
+      "name": "CloseOracle",
+      "accounts": [
+        {
+          "name": "initiator",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "voter",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "oracle",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "closerQuorum",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "authority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "close",
+          "type": {
+            "defined": "CloseArgs"
+          }
+        }
+      ],
+      "discriminant": {
+        "type": "u8",
+        "value": 2
+      }
+    },
+    {
+      "name": "InitializeAuthority",
+      "accounts": [
+        {
+          "name": "initializer",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "authority",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [],
+      "discriminant": {
+        "type": "u8",
+        "value": 3
+      }
+    },
+    {
+      "name": "AttestAuthority",
+      "accounts": [
+        {
+          "name": "attester",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "authority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "candidate",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "individualAuthority",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "attesterIndividualAuthority",
+          "isMut": false,
+          "isSigner": false,
+          "isOptional": true
+        }
+      ],
+      "args": [],
+      "discriminant": {
+        "type": "u8",
+        "value": 4
+      }
+    },
+    {
+      "name": "RemoveAuthority",
+      "accounts": [
+        {
+          "name": "root",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "authority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "candidate",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "individualAuthority",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "recipient",
+          "isMut": true,
+          "isSigner": false
+        }
+      ],
+      "args": [],
+      "discriminant": {
+        "type": "u8",
+        "value": 5
+      }
+    }
+  ],
+  "accounts": [
+    {
+      "name": "FootballSettled",
+      "type": {
+        "kind": "struct",
+        "fields": [
           {
-            "defaultValue": {
-              "kind": "numberValueNode",
-              "number": 0
-            },
-            "defaultValueStrategy": "omitted",
-            "kind": "instructionArgumentNode",
-            "name": "discriminator",
-            "type": {
-              "endian": "le",
-              "format": "u8",
-              "kind": "numberTypeNode"
-            }
-          },
-          {
-            "kind": "instructionArgumentNode",
             "name": "marketKind",
             "type": {
-              "kind": "definedTypeLinkNode",
-              "name": "marketKind"
+              "defined": "MarketKind"
             }
           },
           {
-            "kind": "instructionArgumentNode",
-            "name": "football",
+            "name": "fixtureMerkleRoot",
             "type": {
-              "kind": "definedTypeLinkNode",
-              "name": "footballSettled"
+              "array": [
+                "u8",
+                32
+              ]
             }
-          }
-        ],
-        "discriminators": [
-          {
-            "kind": "fieldDiscriminatorNode",
-            "name": "discriminator",
-            "offset": 0
-          }
-        ],
-        "kind": "instructionNode",
-        "name": "createOracle"
-      },
-      {
-        "accounts": [
-          {
-            "isSigner": true,
-            "isWritable": true,
-            "kind": "instructionAccountNode",
-            "name": "creator"
           },
           {
-            "isSigner": false,
-            "isWritable": true,
-            "kind": "instructionAccountNode",
-            "name": "oracle"
+            "name": "score",
+            "type": "u8"
           },
           {
-            "isSigner": false,
-            "isWritable": false,
-            "kind": "instructionAccountNode",
-            "name": "systemProgram"
+            "name": "penalties",
+            "type": "u8"
           },
           {
-            "isOptional": true,
-            "isSigner": false,
-            "isWritable": false,
-            "kind": "instructionAccountNode",
-            "name": "individualAuthority"
-          }
-        ],
-        "arguments": [
-          {
-            "defaultValue": {
-              "kind": "numberValueNode",
-              "number": 1
-            },
-            "defaultValueStrategy": "omitted",
-            "kind": "instructionArgumentNode",
-            "name": "discriminator",
+            "name": "status",
             "type": {
-              "endian": "le",
-              "format": "u8",
-              "kind": "numberTypeNode"
+              "defined": "CFootballMatchPhase"
             }
           },
           {
-            "kind": "instructionArgumentNode",
-            "name": "updateKind",
+            "name": "updatedAtUnix",
             "type": {
-              "kind": "definedTypeLinkNode",
-              "name": "updateKind"
+              "array": [
+                "u8",
+                8
+              ]
             }
-          },
+          }
+        ]
+      }
+    }
+  ],
+  "types": [
+    {
+      "name": "CloseArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
           {
-            "kind": "instructionArgumentNode",
-            "name": "footballUpdate",
+            "name": "fixtureMerkleRoot",
             "type": {
-              "kind": "definedTypeLinkNode",
-              "name": "updateFootballArgs"
+              "array": [
+                "u8",
+                32
+              ]
             }
           }
-        ],
-        "discriminators": [
+        ]
+      }
+    },
+    {
+      "name": "UpdateFootballArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
           {
-            "kind": "fieldDiscriminatorNode",
-            "name": "discriminator",
-            "offset": 0
-          }
-        ],
-        "kind": "instructionNode",
-        "name": "updateOracle"
-      },
-      {
-        "accounts": [
-          {
-            "isSigner": true,
-            "isWritable": true,
-            "kind": "instructionAccountNode",
-            "name": "initializer"
+            "name": "score",
+            "type": "u8"
           },
           {
-            "isSigner": false,
-            "isWritable": true,
-            "kind": "instructionAccountNode",
-            "name": "authority"
+            "name": "penalties",
+            "type": "u8"
           },
           {
-            "isSigner": false,
-            "isWritable": false,
-            "kind": "instructionAccountNode",
-            "name": "systemProgram"
-          }
-        ],
-        "arguments": [
-          {
-            "defaultValue": {
-              "kind": "numberValueNode",
-              "number": 3
-            },
-            "defaultValueStrategy": "omitted",
-            "kind": "instructionArgumentNode",
-            "name": "discriminator",
+            "name": "status",
             "type": {
-              "endian": "le",
-              "format": "u8",
-              "kind": "numberTypeNode"
+              "defined": "CFootballMatchPhase"
             }
           }
-        ],
-        "discriminators": [
+        ]
+      }
+    },
+    {
+      "name": "CFootballMatchPhase",
+      "type": {
+        "kind": "enum",
+        "variants": [
           {
-            "kind": "fieldDiscriminatorNode",
-            "name": "discriminator",
-            "offset": 0
+            "name": "Scheduled"
+          },
+          {
+            "name": "FirstHalf"
+          },
+          {
+            "name": "HalfTime"
+          },
+          {
+            "name": "SecondHalf"
+          },
+          {
+            "name": "ExtraTimeFirstHalf"
+          },
+          {
+            "name": "ExtraTimeBreak"
+          },
+          {
+            "name": "ExtraTimeSecondHalf"
+          },
+          {
+            "name": "Penalties"
+          },
+          {
+            "name": "Finished"
           }
-        ],
-        "kind": "instructionNode",
-        "name": "initializeAuthority"
-      },
-      {
-        "accounts": [
+        ]
+      }
+    },
+    {
+      "name": "UpdateKind",
+      "type": {
+        "kind": "enum",
+        "variants": [
           {
-            "isSigner": true,
-            "isWritable": true,
-            "kind": "instructionAccountNode",
-            "name": "attester"
+            "name": "Score"
           },
           {
-            "isSigner": false,
-            "isWritable": false,
-            "kind": "instructionAccountNode",
-            "name": "authority"
+            "name": "Penalties"
           },
           {
-            "isSigner": false,
-            "isWritable": false,
-            "kind": "instructionAccountNode",
-            "name": "candidate"
+            "name": "EventState"
           },
           {
-            "isSigner": false,
-            "isWritable": true,
-            "kind": "instructionAccountNode",
-            "name": "individualAuthority"
+            "name": "Price"
           },
           {
-            "isSigner": false,
-            "isWritable": false,
-            "kind": "instructionAccountNode",
-            "name": "systemProgram"
+            "name": "Confidence"
           },
           {
-            "isOptional": true,
-            "isSigner": false,
-            "isWritable": false,
-            "kind": "instructionAccountNode",
-            "name": "attesterIndividualAuthority"
+            "name": "PublishTime"
           }
-        ],
-        "arguments": [
+        ]
+      }
+    },
+    {
+      "name": "MarketKind",
+      "type": {
+        "kind": "enum",
+        "variants": [
           {
-            "defaultValue": {
-              "kind": "numberValueNode",
-              "number": 4
-            },
-            "defaultValueStrategy": "omitted",
-            "kind": "instructionArgumentNode",
-            "name": "discriminator",
-            "type": {
-              "endian": "le",
-              "format": "u8",
-              "kind": "numberTypeNode"
-            }
-          }
-        ],
-        "discriminators": [
-          {
-            "kind": "fieldDiscriminatorNode",
-            "name": "discriminator",
-            "offset": 0
-          }
-        ],
-        "kind": "instructionNode",
-        "name": "attestAuthority"
-      },
-      {
-        "accounts": [
-          {
-            "isSigner": true,
-            "isWritable": false,
-            "kind": "instructionAccountNode",
-            "name": "root"
+            "name": "Football"
           },
           {
-            "isSigner": false,
-            "isWritable": false,
-            "kind": "instructionAccountNode",
-            "name": "authority"
-          },
-          {
-            "isSigner": false,
-            "isWritable": false,
-            "kind": "instructionAccountNode",
-            "name": "candidate"
-          },
-          {
-            "isSigner": false,
-            "isWritable": true,
-            "kind": "instructionAccountNode",
-            "name": "individualAuthority"
-          },
-          {
-            "isSigner": false,
-            "isWritable": true,
-            "kind": "instructionAccountNode",
-            "name": "recipient"
-          }
-        ],
-        "arguments": [
-          {
-            "defaultValue": {
-              "kind": "numberValueNode",
-              "number": 5
-            },
-            "defaultValueStrategy": "omitted",
-            "kind": "instructionArgumentNode",
-            "name": "discriminator",
-            "type": {
-              "endian": "le",
-              "format": "u8",
-              "kind": "numberTypeNode"
-            }
-          }
-        ],
-        "discriminators": [
-          {
-            "kind": "fieldDiscriminatorNode",
-            "name": "discriminator",
-            "offset": 0
+            "name": "Price"
           }
         ],
         "kind": "instructionNode",

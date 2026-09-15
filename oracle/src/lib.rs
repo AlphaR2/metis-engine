@@ -34,6 +34,7 @@ pub fn process_instruction(
     match POracle::try_from(discriminator)? {
         POracle::CreateOracle => instructions::process_create_oracle(accounts, data),
         POracle::UpdateOracle => instructions::process_update_oracle(accounts, data),
+        POracle::CloseOracle => instructions::process_close_oracle(accounts, data),
         POracle::InitializeAuthority => instructions::process_initialize_authority(accounts),
         POracle::AttestAuthority => instructions::process_attest_authority(accounts),
         POracle::RemoveAuthority => instructions::process_remove_authority(accounts),

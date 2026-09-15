@@ -50,6 +50,7 @@ pub struct IndividualOAuthority {
 }
 
 impl IndividualOAuthority {
+    #[inline]
     pub fn new(address: Address) -> Self {
         Self {
             address: address.to_bytes(),
@@ -71,11 +72,13 @@ impl IndividualOAuthority {
             .any(|attester| authority.supermajority.contains(attester))
     }
 
+    #[inline]
     pub fn attest(&mut self, address: Address) -> ProgramResult {
         let clock = Clock::get()?;
         self.record_attestation(address, clock.unix_timestamp.to_le_bytes())
     }
 
+    #[inline]
     fn record_attestation(&mut self, address: Address, completed_at: [u8; 8]) -> ProgramResult {
         // check that is_attest_complete is zero
         if self.is_attest_complete() {

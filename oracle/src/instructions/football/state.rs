@@ -8,14 +8,16 @@ use crate::{
     error::OracleError,
     state::MarketKind,
 };
-use codama::{CodamaAccount, CodamaType};
+use shank::{ShankAccount, ShankType};
 
 #[repr(C)]
-#[derive(Default, Clone, Copy, NoUninit, CheckedBitPattern, CodamaAccount)]
+#[derive(Default, Clone, Copy, NoUninit, CheckedBitPattern, ShankAccount)]
 pub struct FootballSettled {
     pub market_kind: MarketKind,
     /// Immutable commitment to the provider fixture aliases for this event.
-    /// This is also the unique identity used to derive this account's PDA.
+    /// Every Oracle account stores this at bytes 1..33, immediately after its
+    /// one-byte market kind, so generic instructions need not decode
+    /// sport-specific fields.
     pub fixture_merkle_root: [u8; 32],
     pub score: u8, // this is a bitpack - higher 4 bits is home, lower 4 bits is away
     pub penalties: u8, // this is a bitpack - higher 4 bits is home, lower 4 bits is away
@@ -28,7 +30,7 @@ pub struct FootballSettled {
 // are driven by an off-chain oracle client that isn't built yet). 
 #[allow(dead_code)]
 #[repr(u8)]
-#[derive(Clone, Copy, Default, NoUninit, CheckedBitPattern, PartialEq, CodamaType)]
+#[derive(Clone, Copy, Default, NoUninit, CheckedBitPattern, PartialEq, ShankType)]
 pub enum CFootballMatchPhase {
     #[default]
     Scheduled = 0,
