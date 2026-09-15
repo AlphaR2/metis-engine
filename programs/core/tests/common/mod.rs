@@ -26,7 +26,7 @@ use metis_core::{
     },
     constants::{
         CONFIG_SEED, MARKET_SEED, MAX_OUTCOMES, MIN_SEED, OUTCOME_MINT_SEED,
-        PRIMARY_WINDOW_SECS, QUOTE_DECIMALS, VAULT_SEED, VIRTUAL_LIQUIDITY_MULTIPLE,
+        PRIMARY_WINDOW_SECS, QUOTE_DECIMALS, ROOT_SIGNERS, VAULT_SEED, VIRTUAL_LIQUIDITY_MULTIPLE,
     },
     settlement::instructions::settle_market::SettleMarketArgs,
 };
@@ -66,7 +66,13 @@ pub fn usdc_mint() -> Pubkey {
 pub fn setup() -> LiteSVM {
     let so_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/deploy/metis_core.so");
-    let mut svm = LiteSVM::new();
+    // Signature verification disabled program-wide, same as oracle/'s test harness - needed so
+    // root-authorized calls (initialize_config, update_config) can be sent "as" one of
+    // ROOT_SIGNERS, whose vanity addresses have no known matching private key anyone holds.
+    // Real, correctly-signed transactions (bettor/creator, using genuinely generated Keypairs)
+    // still work exactly as before - this only skips rejecting missing/invalid signatures, it
+    // doesn't affect valid ones.
+    let mut svm = LiteSVM::new().with_sigverify(false);
     svm.add_program_from_file(program_id(), &so_path)
         .unwrap_or_else(|e| panic!("load {so_path:?} — did you run `just build-core`? ({e:?})"));
     create_usdc_mint(&mut svm);
@@ -234,28 +240,23 @@ pub fn setup_with_config_fee(
     market_init_fee: u64,
     max_in_bps_of_vault: u16,
 ) -> Pubkey {
-    let authority = authority_keypair();
-    svm.airdrop(
-        &authority.pubkey(),
-        10 * solana_sdk::native_token::LAMPORTS_PER_SOL,
-    )
-    .expect("airdrop bootstrap admin");
+    let authority = root_signer(0);
+    svm.airdrop(&authority, 10 * solana_sdk::native_token::LAMPORTS_PER_SOL)
+        .expect("airdrop bootstrap admin");
 
-    let (config, _) = config_pda(&authority.pubkey());
-    send(
+    let (config, _) = config_pda();
+    send_as(
         svm,
         ix_initialize_config(
-            &authority.pubkey(),
+            &authority,
             &config,
             market_init_fee,
             0, // fee_bps — no fee mechanism wired up yet
             max_in_bps_of_vault,
-            &authority.pubkey(),
             &usdc_mint(),
             MAX_OUTCOMES as u8,
         ),
-        &authority,
-        &[],
+        authority,
     )
     .expect("setup_with_config: initialize_config should succeed");
 
@@ -306,6 +307,15 @@ pub fn authority_keypair() -> Keypair {
     })
 }
 
+// One of Config.root's own ROOT_SIGNERS - a vanity address with no known matching private key,
+// same situation as oracle/'s tests. No Keypair needed at all: send_as() builds an unsigned
+// transaction naming this pubkey as signer, and setup()'s LiteSVM has sigverify disabled to
+// accept it - mirrors oracle/'s test pattern of using Pubkey::new_from_array(ROOT_SIGNERS[n])
+// directly rather than a real Keypair.
+pub fn root_signer(index: usize) -> Pubkey {
+    Pubkey::new_from_array(ROOT_SIGNERS[index].to_bytes())
+}
+
 // ── PDAs ─────────────────────────────────────────────────────────────────
 
 pub fn market_pda(creator: &Pubkey, nonce: u64) -> (Pubkey, u8) {
@@ -339,8 +349,14 @@ pub fn outcome_ata(market: &Pubkey, owner: &Pubkey, index: u8) -> Pubkey {
 // Per-authority PDA (see initialize_config.rs's own note on this) — in
 // practice always called with the bootstrap admin's own pubkey, since only
 // that signer can ever successfully create one.
-pub fn config_pda(authority: &Pubkey) -> (Pubkey, u8) {
-    Pubkey::find_program_address(&[CONFIG_SEED, authority.as_ref()], &program_id())
+// Config is a protocol-wide singleton, so its PDA is seeded from the fixed GUARDIAN constant,
+// not from whichever root signer happens to call initialize_config - see the real program's
+// config/instructions/initialize_config.rs for why.
+pub fn config_pda() -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[CONFIG_SEED, metis_core::constants::GUARDIAN.as_ref()],
+        &program_id(),
+    )
 }
 
 // ── Instruction builders ─────────────────────────────────────────────────
@@ -499,7 +515,6 @@ pub fn ix_initialize_config(
     market_init_fee: u64,
     fee_bps: u16,
     max_in_bps_of_vault: u16,
-    admin: &Pubkey,
     quote_mint: &Pubkey,
     max_outcomes: u8,
 ) -> Instruction {
@@ -508,7 +523,6 @@ pub fn ix_initialize_config(
         virtual_liquidity_multiple: VIRTUAL_LIQUIDITY_MULTIPLE,
         fee_bps,
         max_in_bps_of_vault,
-        admin: admin.to_bytes().into(),
         quote_mint: quote_mint.to_bytes().into(),
         max_outcomes,
         _padding: [0u8; 3],
@@ -534,7 +548,6 @@ pub fn ix_update_config(
     market_init_fee: u64,
     fee_bps: u16,
     max_in_bps_of_vault: u16,
-    new_admin: &Pubkey,
     quote_mint: &Pubkey,
     max_outcomes: u8,
 ) -> Instruction {
@@ -543,7 +556,6 @@ pub fn ix_update_config(
         virtual_liquidity_multiple: VIRTUAL_LIQUIDITY_MULTIPLE,
         fee_bps,
         max_in_bps_of_vault,
-        new_admin: new_admin.to_bytes().into(),
         quote_mint: quote_mint.to_bytes().into(),
         max_outcomes,
         _padding: [0u8; 3],
@@ -582,6 +594,22 @@ pub fn send(
     let blockhash = svm.latest_blockhash();
     let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &signers, blockhash);
 
+    svm.send_transaction(tx).map(|_| ())
+}
+
+// For a root-authorized call (initialize_config, update_config) sent "as" one of ROOT_SIGNERS -
+// no real Keypair exists for those vanity addresses, so this builds an unsigned transaction
+// with `payer` as the fee payer, same pattern as oracle/'s test send_unsigned. Only works
+// because setup()'s LiteSVM has sigverify disabled.
+#[allow(clippy::result_large_err)] // see send()'s note above
+pub fn send_as(
+    svm: &mut LiteSVM,
+    ix: Instruction,
+    payer: Pubkey,
+) -> Result<(), litesvm::types::FailedTransactionMetadata> {
+    let blockhash = svm.latest_blockhash();
+    let message = solana_sdk::message::Message::new_with_blockhash(&[ix], Some(&payer), &blockhash);
+    let tx = Transaction::new_unsigned(message);
     svm.send_transaction(tx).map(|_| ())
 }
 

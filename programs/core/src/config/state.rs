@@ -1,9 +1,10 @@
-use bytemuck::{Pod, Zeroable};
+use bytemuck::{CheckedBitPattern, NoUninit};
 use pinocchio::Address;
+use metis_authority::root::RootAuthority;
 
 /// One singleton account, protocol-wide, shared by every market.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, NoUninit, CheckedBitPattern)]
 pub struct Config {
     /// The market's opening seed fee that is paid for the creator of the market, 
     /// split evenly across outcomes at initialize_market.
@@ -19,14 +20,8 @@ pub struct Config {
     /// this fraction of the vault's current balance, in basis points.
     /// Scales automatically with pool depth.
     pub max_in_bps_of_vault: u16,
-    
-    /// The one key allowed to call update_config. Intended to be a Squads
-    /// multisig eventually — today it's a single key with unilateral,
-    /// instant control over every field on this account.
-    ///
-    /// TODO(squads-multisig)
-    /// not started.
-    pub admin: Address,
+    /// The root authority is the only entity that can update this config.
+    pub root: RootAuthority,
     /// The stablecoin every NEW market must be denominated in (USDC).
     ///
     /// Markets snapshot this into `Market.quote_mint` at creation and stay
@@ -45,10 +40,10 @@ pub struct Config {
     /// This account's own PDA bump, cached at initialize_config so later
     /// instructions never need to re-derive it.
     pub bump: u8,
-    pub _padding: [u8; 2],
 }
 
-const _: () = assert!(core::mem::size_of::<Config>() == 96);
+
+const _: () = assert!(core::mem::size_of::<Config>() == 200);
 const _: () = assert!(core::mem::align_of::<Config>() == 8);
 
 // ── Discriminators owned by this part
@@ -56,5 +51,20 @@ const _: () = assert!(core::mem::align_of::<Config>() == 8);
 // if a struct is renamed or a new account/instruction is added.
 
 pub const CONFIG_DISCRIMINATOR: [u8; 8] = [155, 12, 170, 224, 30, 250, 204, 130];
+pub const DELEGATED_AUTHORITY_DISCRIMINATOR: [u8; 8] = [89, 106, 242, 124, 175, 252, 140, 92];
 pub const INITIALIZE_CONFIG: [u8; 8] = [208, 127, 21, 1, 194, 190, 196, 70];
 pub const UPDATE_CONFIG: [u8; 8] = [29, 158, 252, 191, 10, 83, 219, 99];
+pub const ATTEST_AUTHORITY: [u8; 8] = [109, 185, 129, 174, 230, 153, 126, 135];
+pub const REMOVE_AUTHORITY: [u8; 8] = [242, 104, 208, 132, 190, 250, 74, 216];
+
+impl metis_authority::instructions::RootBearing for Config {
+    #[inline]
+    fn root(&self) -> &RootAuthority {
+        &self.root
+    }
+
+    #[inline]
+    fn discriminator(&self) -> [u8; 8] {
+        self.discriminator
+    }
+}

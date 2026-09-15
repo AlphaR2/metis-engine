@@ -14,12 +14,8 @@ solana-address = { workspace = true }
 bytemuck = { workspace = true }
 pinocchio-system = { workspace = true }
 pinocchio-token = { workspace = true }
-codama = { workspace = true }
-
-[build-dependencies]
-codama = { workspace = true }
-serde_json = { workspace = true }
-
+shank = { workspace = true }
+metis-authority = { workspace = true }
 
 [dev-dependencies]
 litesvm = { workspace = true }

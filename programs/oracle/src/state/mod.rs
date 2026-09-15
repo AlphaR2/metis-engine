@@ -4,8 +4,8 @@ use shank::ShankType;
 pub mod market;
 pub use market::*;
 
-pub mod authority;
-pub use authority::*;
+pub use metis_authority::delegated::DelegatedAuthority;
+pub use metis_authority::root::RootAuthority;
 
 pub mod close_quorum;
 pub use close_quorum::*;

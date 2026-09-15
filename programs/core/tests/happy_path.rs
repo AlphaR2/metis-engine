@@ -71,21 +71,14 @@ fn initialize_config_then_market_then_bet_then_settle_then_claim() {
         "winning shares are burned on claim"
     );
 
-    // update_config - confirm the admin path still works end to end too
-    send(
+    // update_config - confirm the root-authorized path still works end to end too. Sent "as"
+    // one of Config.root's ROOT_SIGNERS, not the settle_market `authority` above - those are
+    // two separate authorization checks (Market.authority vs. Config.root).
+    let root = root_signer(0);
+    send_as(
         &mut svm,
-        ix_update_config(
-            &config,
-            &authority.pubkey(),
-            20_000_000,
-            0,
-            0,
-            &authority.pubkey(),
-            &usdc_mint(),
-            2,
-        ),
-        &authority,
-        &[],
+        ix_update_config(&config, &root, 20_000_000, 0, 0, &usdc_mint(), 2),
+        root,
     )
     .expect("update_config should succeed");
 }

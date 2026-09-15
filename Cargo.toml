@@ -1,18 +1,20 @@
 [workspace]
 resolver = "2"
-members = ["programs/*", "oracle", "sdk", "tools/*", "aggregator"]
+members = ["programs/*", "sdk", "tools/*", "aggregator", "authority"]
 
 [workspace.dependencies]
+metis-authority = {path = "authority"}
+
 pinocchio = "0.11.2"
 pinocchio-system = "0.6.1"
 pinocchio-token = "0.7.0"
 pinocchio-associated-token-account = "0.4.0"
 bytemuck = { version = "1.25.2", features = ["derive"] }
-codama = "0.7.2"
 solana-address = { version = "2.6.1", features = ["bytemuck", "decode"] }
 litesvm = "0.16.0"
 litesvm-utils = "0.4.0"
 proptest = "1.6"
+shank = "0.4.9"
 solana-sdk = "4"
 solana-system-interface = "3"
 serde = { version = "1.0", features = ["derive"] }

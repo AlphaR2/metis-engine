@@ -38,7 +38,5 @@ pub fn process_instruction(
         POracle::InitializeAuthority => instructions::process_initialize_authority(accounts),
         POracle::AttestAuthority => instructions::process_attest_authority(accounts),
         POracle::RemoveAuthority => instructions::process_remove_authority(accounts),
-
-        _ => Err(ProgramError::InvalidInstructionData),
     }
 }

@@ -1,0 +1,10 @@
+[package]
+name = "metis-authority"
+version = "0.1.0"
+edition = "2024"
+
+
+[dependencies]
+pinocchio = { workspace = true }
+pinocchio-system = { workspace = true }
+bytemuck = { workspace = true }

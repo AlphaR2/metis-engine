@@ -9,9 +9,9 @@ use pinocchio_system::instructions::CreateAccount;
 use shank::ShankType;
 
 use crate::{
-    errors::OracleError,
-    instructions::authority::AUTHORITY_SEED,
-    state::{CLOSER_QUORUM_SEED, CloserQuorum, OracleAuthority},
+    constants::{AUTHORITY_SEED, CLOSER_QUORUM_SEED, GUARDIAN},
+    error::OracleError,
+    state::{CloserQuorum, RootAuthority},
 };
 
 #[repr(C)]
@@ -42,7 +42,7 @@ impl CloseArgs {
 ///   1 voter           (signer only while voting; ignored while creating)
 ///   2 oracle          (writable Oracle account)
 ///   3 closer_quorum   (writable PDA: [closer_quorum, oracle])
-///   4 authority       (OracleAuthority PDA)
+///   4 authority       (RootAuthority PDA)
 ///   5 system_program
 pub fn process_close_oracle(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let args = CloseArgs::load(data)?;
@@ -81,13 +81,14 @@ pub fn process_close_oracle(accounts: &mut [AccountView], data: &[u8]) -> Progra
         }
     }
 
-    let (expected_authority, _) = Address::derive_program_address(&[AUTHORITY_SEED], &crate::ID)
-        .ok_or(OracleError::InvalidAuthorityPda)?;
+    let (expected_authority, _) =
+        Address::derive_program_address(&[AUTHORITY_SEED, GUARDIAN.as_ref()], &crate::ID)
+            .ok_or(OracleError::InvalidAuthorityPda)?;
     if expected_authority != *authority.address() || !authority.owned_by(&crate::ID) {
         return Err(OracleError::InvalidAuthorityPda.into());
     }
 
-    let authority_state = *bytemuck::checked::try_from_bytes::<OracleAuthority>(unsafe {
+    let authority_state = *bytemuck::checked::try_from_bytes::<RootAuthority>(unsafe {
         authority.borrow_unchecked()
     })
     .map_err(|_| OracleError::InvalidAuthority)?;

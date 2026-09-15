@@ -8,9 +8,9 @@ pub mod authority {
     use solana_transaction::Transaction;
 
     use crate::{
-        constants::{AUTHORITY_SEED, INDIVIDUAL_AUTHORITY_SEED, SUPERMAJORITIES},
+        constants::{AUTHORITY_SEED, GUARDIAN, INDIVIDUAL_AUTHORITY_SEED, ROOT_SIGNERS},
         instructions::POracle,
-        state::{IndividualOAuthority, OracleAuthority},
+        state::{DelegatedAuthority, RootAuthority},
         tests::tests::program_id,
     };
 
@@ -34,14 +34,14 @@ pub mod authority {
         svm.set_sysvar(&clock);
         let program_bytes = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../target/deploy/metis-oracle.so"
+            "/../../target/deploy/metis-oracle.so"
         ))
         .expect("build the SBF program first: cargo build-sbf");
         svm.add_program(program_id(), &program_bytes)
             .expect("program loads");
 
-        let root_1 = Pubkey::new_from_array(SUPERMAJORITIES[0]);
-        let root_2 = Pubkey::new_from_array(SUPERMAJORITIES[1]);
+        let root_1 = Pubkey::new_from_array(ROOT_SIGNERS[0].to_bytes());
+        let root_2 = Pubkey::new_from_array(ROOT_SIGNERS[1].to_bytes());
         let candidate = Pubkey::new_from_array([99; 32]);
         let recipient = Pubkey::new_from_array([100; 32]);
         svm.airdrop(&root_1, 10 * 1_000_000_000).unwrap();
@@ -50,7 +50,7 @@ pub mod authority {
 
         let system_program: Pubkey = "11111111111111111111111111111111".parse().unwrap();
         let (authority, _) =
-            solana_address::Address::find_program_address(&[AUTHORITY_SEED], &crate::ID);
+            solana_address::Address::find_program_address(&[AUTHORITY_SEED, GUARDIAN.as_ref()], &crate::ID);
         let (individual_authority, _) = solana_address::Address::find_program_address(
             &[INDIVIDUAL_AUTHORITY_SEED, candidate.as_ref()],
             &crate::ID,
@@ -74,12 +74,11 @@ pub mod authority {
             .get_account(&authority)
             .expect("authority account exists");
         let authority_state =
-            bytemuck::checked::try_from_bytes::<OracleAuthority>(&authority_account.data)
+            bytemuck::checked::try_from_bytes::<RootAuthority>(&authority_account.data)
                 .expect("authority account data is valid");
-        assert_eq!(
-            authority_state.supermajority,
-            OracleAuthority::hardcoded().supermajority
-        );
+        for root in ROOT_SIGNERS {
+            assert!(authority_state.is_root(root));
+        }
 
         for root in [root_1, root_2] {
             send_unsigned(
@@ -103,7 +102,7 @@ pub mod authority {
             .get_account(&individual_authority)
             .expect("candidate authority account exists");
         let individual_state =
-            bytemuck::checked::try_from_bytes::<IndividualOAuthority>(&individual_account.data)
+            bytemuck::checked::try_from_bytes::<DelegatedAuthority>(&individual_account.data)
                 .expect("candidate authority data is valid");
         assert!(individual_state.is_attest_complete());
         assert_eq!(

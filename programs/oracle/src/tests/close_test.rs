@@ -9,8 +9,12 @@ pub mod close_oracle {
     use solana_transaction::Transaction;
 
     use crate::{
-        instructions::{POracle, authority::AUTHORITY_SEED, close_oracle::CloseArgs},
-        state::{CLOSER_QUORUM_SEED, CloserQuorum, OracleAuthority, SUPERMAJORITIES},
+        constants::{
+            AUTHORITY_SEED, CLOSER_QUORUM_SEED, GUARDIAN, ORACLE_AUTHORITY_DISCRIMINATOR,
+            ROOT_SIGNERS,
+        },
+        instructions::{POracle, close_oracle::CloseArgs},
+        state::{CloserQuorum, RootAuthority},
         tests::tests::program_id,
     };
 
@@ -41,14 +45,14 @@ pub mod close_oracle {
         svm.set_sysvar(&clock);
         let program_bytes = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../target/deploy/metis-oracle.so"
+            "/../../target/deploy/metis-oracle.so"
         ))
         .expect("build the SBF program first: cargo build-sbf");
         svm.add_program(program_id(), &program_bytes)
             .expect("program loads");
 
-        let root_1 = Pubkey::new_from_array(SUPERMAJORITIES[0]);
-        let root_2 = Pubkey::new_from_array(SUPERMAJORITIES[1]);
+        let root_1 = Pubkey::new_from_array(ROOT_SIGNERS[0].to_bytes());
+        let root_2 = Pubkey::new_from_array(ROOT_SIGNERS[1].to_bytes());
         let initiator = Pubkey::new_from_array([55; 32]);
         for account in [root_1, root_2, initiator] {
             svm.airdrop(&account, 10 * 1_000_000_000).unwrap();
@@ -63,12 +67,17 @@ pub mod close_oracle {
             &crate::ID,
         );
         let (authority, _) =
-            solana_address::Address::find_program_address(&[AUTHORITY_SEED], &crate::ID);
+            solana_address::Address::find_program_address(&[AUTHORITY_SEED, GUARDIAN.as_ref()], &crate::ID);
         svm.set_account(
             authority,
             Account {
                 lamports: 1_000_000,
-                data: bytemuck::bytes_of(&OracleAuthority::hardcoded()).to_vec(),
+                data: bytemuck::bytes_of(&RootAuthority::new(
+                    &ROOT_SIGNERS,
+                    GUARDIAN,
+                    ORACLE_AUTHORITY_DISCRIMINATOR,
+                ))
+                .to_vec(),
                 owner: program_id(),
                 ..Default::default()
             },

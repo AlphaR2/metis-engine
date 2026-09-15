@@ -3,6 +3,7 @@ pub const MARKET_SEED: &[u8] = b"market";
 pub const VAULT_SEED: &[u8] = b"vault";
 pub const CONFIG_SEED: &[u8] = b"config";
 pub const OUTCOME_MINT_SEED: &[u8] = b"outcome_mint";
+pub const DELEGATED_AUTHORITY_SEED: &[u8] = b"delegated_authority";
 pub const QUOTE_DECIMALS: u8 = 6;
 
 // Outcome encoding
@@ -75,5 +76,14 @@ const _: () = assert!(MAX_PRICE_IMPACT_BPS <= BPS_DENOMINATOR);
 // production key (and a real keypair to match) before any real deploy.
 pub const AUTHORITY: Address = address!("eaZoYS1Ej58sL64S3PtZbo7XS5euS7oTC1CzsEmP6VE");
 
+// Root authority keys - same 3 signers as oracle/, so both programs share one trust root
 
-pub const INITIAL_CONFIG_ADMIN: Address = address!("eaZoYS1Ej58sL64S3PtZbo7XS5euS7oTC1CzsEmP6VE");
+pub const ROOT_SIGNERS: [Address; 3] = [
+    address!("UPDTR3Mmf4qQatb5qy8rE7aEw34Jq2AUJknEgbTuw8B"),
+    address!("UPdtRERKVQhyEEFmxTUmmezz1BStBS1wiXn1h74bhRG"),
+    address!("upDTrFkAvEEk2N9JoxbeY6jg1KHJNzu8BAqdf7f2xVc"),
+];
+
+// PLACEHOLDER — must be a real, independently-held keypair before any real deploy, distinct
+// from all three ROOT_SIGNERS. Same address as oracle's GUARDIAN placeholder, same caveat.
+pub const GUARDIAN: Address = address!("eaZoYS1Ej58sL64S3PtZbo7XS5euS7oTC1CzsEmP6VE");

@@ -46,6 +46,12 @@ pub fn process_instruction(
         config::state::UPDATE_CONFIG => {
             config::instructions::update_config::process_update_config(accounts, data)
         }
+        config::state::ATTEST_AUTHORITY => {
+            config::instructions::attest_authority::process_attest_authority(accounts)
+        }
+        config::state::REMOVE_AUTHORITY => {
+            config::instructions::remove_authority::process_remove_authority(accounts)
+        }
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

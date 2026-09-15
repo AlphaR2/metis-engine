@@ -13,7 +13,7 @@ use crate::{
     amm::state::{MARKET_DISCRIMINATOR, Market, MarketStatus},
     config::state::{CONFIG_DISCRIMINATOR, Config},
     constants::{
-        CONFIG_SEED, INITIAL_CONFIG_ADMIN, MARKET_SEED, MAX_OUTCOMES, MAX_PRICE_IMPACT_BPS,
+        CONFIG_SEED, GUARDIAN, MARKET_SEED, MAX_OUTCOMES, MAX_PRICE_IMPACT_BPS,
         OUTCOME_MINT_SEED, QUOTE_DECIMALS,
     },
     error::MetisError,
@@ -118,7 +118,7 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
     }
 
     // load in config to get things started
-    let config_seeds: [&[u8]; 2] = [CONFIG_SEED, INITIAL_CONFIG_ADMIN.as_ref()];
+    let config_seeds: [&[u8]; 2] = [CONFIG_SEED, GUARDIAN.as_ref()];
     let (config_pda, _) = Address::derive_program_address(&config_seeds, &crate::ID)
         .ok_or(ProgramError::InvalidSeeds)?;
 
@@ -133,7 +133,8 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
     // get trade-cap protection params
     let max_in_bps_of_vault = {
         let config_data = config.try_borrow()?;
-        let config_state: &Config = from_bytes(&config_data);
+        let config_state =
+            validation::unpack::<Config>(&config_data, MetisError::InvalidConfigAccount)?;
         validation::require_discriminator(config_state.discriminator, CONFIG_DISCRIMINATOR)?;
         config_state.max_in_bps_of_vault
     };

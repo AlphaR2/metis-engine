@@ -34,6 +34,10 @@ fn main() {
         "pub const CONFIG_DISCRIMINATOR:   [u8; 8] = {:?};",
         discriminator("account:Config")
     );
+    println!(
+        "pub const DELEGATED_AUTHORITY_DISCRIMINATOR: [u8; 8] = {:?};",
+        discriminator("account:DelegatedAuthority")
+    );
 
     println!();
     println!("// ── Instruction discriminators ───────────────────────────────────────");
@@ -60,6 +64,14 @@ fn main() {
     println!(
         "pub const UPDATE_CONFIG:     [u8; 8] = {:?};",
         discriminator("global:update_config")
+    );
+    println!(
+        "pub const ATTEST_AUTHORITY:  [u8; 8] = {:?};",
+        discriminator("global:attest_authority")
+    );
+    println!(
+        "pub const REMOVE_AUTHORITY:  [u8; 8] = {:?};",
+        discriminator("global:remove_authority")
     );
 
     // oracle/ account discriminators - paste into oracle/src/constants.rs

@@ -85,10 +85,63 @@ pub enum MetisError {
     /// claim expects. Distinct from InvalidPda: this is a stored-reference
     /// check, not a fresh derivation.
     WrongAccountReference = 19,
+
+    /// Not one of Config.root's own signers, where root approval was required
+    /// (attest_authority/remove_authority).
+    UnauthorizedAuthority = 20,
+
+    /// The root-bearing account already exists / isn't empty at initialize time.
+    AlreadyInitialized = 21,
+
+    /// A RootBearing (Config) or DelegatedAuthority account's discriminator, stored address
+    /// field, or general shape didn't check out.
+    InvalidAuthorityAccount = 22,
+
+    /// `Rent::try_minimum_balance` failed while creating a DelegatedAuthority account.
+    RentCalculationFailed = 23,
+
+    /// The same attester/voter tried to attest/vote twice.
+    DuplicateAuthority = 24,
+
+    /// Tried to attest/vote after the quorum was already complete.
+    AttestationComplete = 25,
+
+    /// A non-root attester tried to finish off a candidate no root has touched yet.
+    MissingRootAttestation = 26,
 }
 
 impl From<MetisError> for ProgramError {
     fn from(e: MetisError) -> Self {
         ProgramError::Custom(e as u32)
+    }
+}
+
+impl metis_authority::errors::AuthorityErrors for MetisError {
+    fn must_sign() -> Self {
+        MetisError::AuthorityMustSign
+    }
+    fn unauthorized_authority() -> Self {
+        MetisError::UnauthorizedAuthority
+    }
+    fn already_initialized() -> Self {
+        MetisError::AlreadyInitialized
+    }
+    fn invalid_authority_pda() -> Self {
+        MetisError::InvalidPda
+    }
+    fn invalid_authority() -> Self {
+        MetisError::InvalidAuthorityAccount
+    }
+    fn rent_calculation_failed() -> Self {
+        MetisError::RentCalculationFailed
+    }
+    fn duplicate_authority() -> Self {
+        MetisError::DuplicateAuthority
+    }
+    fn attestation_complete() -> Self {
+        MetisError::AttestationComplete
+    }
+    fn missing_root_attestation() -> Self {
+        MetisError::MissingRootAttestation
     }
 }

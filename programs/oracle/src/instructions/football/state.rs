@@ -4,7 +4,7 @@ use pinocchio::ProgramResult;
 use pinocchio::sysvars::{Sysvar, clock::Clock};
 
 use crate::{
-    constants::{FOOTBALL_SETTLED_DISCRIMINATOR, SCORE_NIBBLE_MASK, SCORE_NIBBLE_MAX},
+    constants::{FOOTBALL_SETTLED_DISCRIMINATOR, SCORE_NIBBLE_MASK, SCORE_NIBBLE_MAX, CLOSER_QUORUM_SEED},
     error::OracleError,
     state::MarketKind,
 };

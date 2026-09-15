@@ -15,6 +15,7 @@ pub mod create_oracle {
             creator,
             oracle,
             system_program,
+            authority,
             individual_authority,
             ..
         } = state;
@@ -27,6 +28,7 @@ pub mod create_oracle {
                 AccountMeta::new(creator.pubkey(), true),
                 AccountMeta::new(*oracle, false),
                 AccountMeta::new_readonly(*system_program, false),
+                AccountMeta::new_readonly(*authority, false),
                 AccountMeta::new_readonly(*individual_authority, false),
             ],
             data: [(POracle::CreateOracle as u8)]

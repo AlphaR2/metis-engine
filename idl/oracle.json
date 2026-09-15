@@ -54,22 +54,6 @@
           "isMut": true,
           "isSigner": true
         },
-            },
-            {
-              "kind": "structFieldTypeNode",
-              "name": "discriminator",
-              "type": {
-                "count": {
-                  "kind": "fixedCountNode",
-                  "value": 8
-                },
-                "item": {
-                  "endian": "le",
-                  "format": "u8",
-                  "kind": "numberTypeNode"
-                },
-                "kind": "arrayTypeNode"
-              }
         {
           "name": "oracle",
           "isMut": true,
@@ -298,6 +282,15 @@
                 8
               ]
             }
+          },
+          {
+            "name": "discriminator",
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
           }
         ]
       }
@@ -415,17 +408,12 @@
           {
             "name": "Price"
           }
-        ],
-        "kind": "instructionNode",
-        "name": "removeAuthority"
+        ]
       }
-    ],
-    "kind": "programNode",
-    "name": "metisOracle",
-    "pdas": [],
-    "publicKey": "PorC1q7btDTY3jyrNxCgieXU5a4nGzhchjjnThYM3un",
-    "version": "0.1.0"
-  },
-  "standard": "codama",
-  "version": "1.0.0"
+    }
+  ],
+  "metadata": {
+    "origin": "shank",
+    "address": "PorC1q7btDTY3jyrNxCgieXU5a4nGzhchjjnThYM3un"
+  }
 }

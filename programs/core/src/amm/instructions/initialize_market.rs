@@ -17,7 +17,7 @@ use crate::{
     amm::state::{MARKET_DISCRIMINATOR, Market, MarketStatus},
     config::state::{CONFIG_DISCRIMINATOR, Config},
     constants::{
-        AUTHORITY, CONFIG_SEED, INITIAL_CONFIG_ADMIN, MARKET_SEED, MAX_OUTCOMES, OUTCOME_MINT_SEED,
+        AUTHORITY, CONFIG_SEED, GUARDIAN, MARKET_SEED, MAX_OUTCOMES, OUTCOME_MINT_SEED,
         OUTCOME_UNRESOLVED, PRIMARY_WINDOW_SECS, QUOTE_DECIMALS, VAULT_SEED,
     },
     error::MetisError,
@@ -128,7 +128,7 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
 
     // Config holds the protocol-wide settings every market must follow.
     // We rebuild its address ourselves so a caller can't hand us a fake one.
-    let config_seeds: [&[u8]; 2] = [CONFIG_SEED, INITIAL_CONFIG_ADMIN.as_ref()];
+    let config_seeds: [&[u8]; 2] = [CONFIG_SEED, GUARDIAN.as_ref()];
     let (config_pda, _) = Address::derive_program_address(&config_seeds, &crate::ID)
         .ok_or(ProgramError::InvalidSeeds)?;
 
@@ -148,7 +148,8 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
 
     let (market_init_fee, max_outcomes, cfg_quote_mint, virtual_liquidity_multiple) = {
         let config_data = config.try_borrow()?;
-        let config_state: &Config = from_bytes(&config_data);
+        let config_state =
+            validation::unpack::<Config>(&config_data, MetisError::InvalidConfigAccount)?;
         validation::require_discriminator(config_state.discriminator, CONFIG_DISCRIMINATOR)?;
         (
             config_state.market_init_fee,

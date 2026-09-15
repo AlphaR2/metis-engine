@@ -18,15 +18,19 @@ mod tests {
     use crate::tests::create_test::create_oracle::create_oracle_function;
     use crate::tests::update_test::update_oracle::update_oracle_function;
     use crate::{
-        constants::{AUTHORITY_SEED, FOOTBALL_SEED, INDIVIDUAL_AUTHORITY_SEED, SETTLED_SEED},
+        constants::{
+            AUTHORITY_SEED, FOOTBALL_SEED, GUARDIAN, INDIVIDUAL_AUTHORITY_DISCRIMINATOR,
+            INDIVIDUAL_AUTHORITY_SEED, ORACLE_AUTHORITY_DISCRIMINATOR, ROOT_SIGNERS, SETTLED_SEED,
+        },
         instructions::{POracle, football::FootballSettled},
-        state::{IndividualOAuthority, MarketKind, OracleAuthority},
+        state::{DelegatedAuthority, MarketKind, RootAuthority},
     };
 
     pub struct ReusableState {
         pub creator: Keypair,
         pub oracle: Pubkey,
         pub system_program: Pubkey,
+        pub authority: Pubkey,
         pub individual_authority: Pubkey,
     }
 
@@ -45,7 +49,7 @@ mod tests {
 
         let program_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../target/deploy/metis-oracle.so"
+            "/../../target/deploy/metis-oracle.so"
         );
         let program_bytes =
             std::fs::read(program_path).expect("build the SBF program first: cargo build-sbf");
@@ -57,7 +61,7 @@ mod tests {
             &crate::ID,
         );
         let (authority, _) =
-            solana_address::Address::find_program_address(&[AUTHORITY_SEED], &crate::ID);
+            solana_address::Address::find_program_address(&[AUTHORITY_SEED, GUARDIAN.as_ref()], &crate::ID);
         let (individual_authority, _) = solana_address::Address::find_program_address(
             &[INDIVIDUAL_AUTHORITY_SEED, creator.pubkey().as_ref()],
             &crate::ID,
@@ -67,18 +71,23 @@ mod tests {
             authority,
             Account {
                 lamports: 1_000_000,
-                data: bytemuck::bytes_of(&OracleAuthority::hardcoded()).to_vec(),
+                data: bytemuck::bytes_of(&RootAuthority::new(
+                    &ROOT_SIGNERS,
+                    GUARDIAN,
+                    ORACLE_AUTHORITY_DISCRIMINATOR,
+                ))
+                .to_vec(),
                 owner: program_id(),
                 ..Default::default()
             },
         )
         .expect("authority configuration is seeded");
 
-        let mut creator_authority =
-            IndividualOAuthority::new(pinocchio::Address::from(creator.pubkey().to_bytes()));
-        creator_authority.attesters = OracleAuthority::hardcoded().supermajority[..2]
-            .try_into()
-            .expect("two hardcoded roots");
+        let mut creator_authority = DelegatedAuthority::new(
+            pinocchio::Address::from(creator.pubkey().to_bytes()),
+            INDIVIDUAL_AUTHORITY_DISCRIMINATOR,
+        );
+        creator_authority.attesters = [ROOT_SIGNERS[0].to_bytes(), ROOT_SIGNERS[1].to_bytes()];
         creator_authority.is_attest_complete = 1u64.to_le_bytes();
         svm.set_account(
             individual_authority,
@@ -97,6 +106,7 @@ mod tests {
             system_program: "11111111111111111111111111111111"
                 .parse()
                 .expect("valid system program id"),
+            authority,
             individual_authority,
         };
 
@@ -143,6 +153,7 @@ mod tests {
                 AccountMeta::new(outsider.pubkey(), true),
                 AccountMeta::new(reusable_state.oracle, false),
                 AccountMeta::new_readonly(reusable_state.system_program, false),
+                AccountMeta::new_readonly(reusable_state.authority, false),
             ],
             data: [(POracle::CreateOracle as u8)]
                 .into_iter()

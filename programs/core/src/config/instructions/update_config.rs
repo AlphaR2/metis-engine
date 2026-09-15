@@ -1,4 +1,4 @@
-use bytemuck::{Pod, Zeroable, from_bytes, from_bytes_mut};
+use bytemuck::{Pod, Zeroable, from_bytes};
 use pinocchio::{AccountView, Address, ProgramResult, error::ProgramError};
 
 use crate::{
@@ -11,7 +11,10 @@ use crate::{
     validation,
 };
 
-// Same field set as InitializeConfigArgs, same "wholesale replace"
+// Same field set as InitializeConfigArgs, same "wholesale replace" - root itself is not
+// rotatable through this instruction (same as oracle: no root-rotation instruction exists
+// there either). Rotating root signers is deliberately separate, higher-friction work, not a
+// field any single admin could once unilaterally overwrite.
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
@@ -22,7 +25,6 @@ pub struct UpdateConfigArgs {
     pub virtual_liquidity_multiple: u64,
     pub fee_bps: u16,
     pub max_in_bps_of_vault: u16,
-    pub new_admin: Address,
     /// Only affects markets created after this call.
     pub quote_mint: Address,
     pub max_outcomes: u8,
@@ -40,7 +42,7 @@ impl UpdateConfigArgs {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<UpdateConfigArgs>() == 88);
+const _: () = assert!(core::mem::size_of::<UpdateConfigArgs>() == 56);
 
 pub fn process_update_config(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let args = UpdateConfigArgs::load(data)?;
@@ -58,15 +60,13 @@ pub fn process_update_config(accounts: &mut [AccountView], data: &[u8]) -> Progr
     )?;
 
     let mut config_data = config.try_borrow_mut()?;
-    let config_state: &mut Config = from_bytes_mut(&mut config_data);
+    let config_state = validation::unpack_mut::<Config>(&mut config_data, MetisError::InvalidConfigAccount)?;
 
     validation::require_discriminator(config_state.discriminator, CONFIG_DISCRIMINATOR)?;
-    // validate admin to update mint
-    validation::require_addresses_match(
-        admin.address(),
-        &config_state.admin,
-        MetisError::WrongAccountReference,
-    )?;
+    // Any current root signer can update config parameters - same as oracle's root check.
+    if !config_state.root.is_root(*admin.address()) {
+        return Err(MetisError::AuthorityMustSign.into());
+    }
 
     // Same real per-field ceilings as initialize_config
     if args.fee_bps > MAX_FEE_PRIMARY_BPS
@@ -88,10 +88,7 @@ pub fn process_update_config(accounts: &mut [AccountView], data: &[u8]) -> Progr
         return Err(ProgramError::InvalidInstructionData);
     }
 
-    if args.new_admin == Address::default() {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-    // Same reasoning as new_admin: a zeroed quote mint would silently break
+    // Same reasoning as before: a zeroed quote mint would silently break
     if args.quote_mint == Address::default() {
         return Err(ProgramError::InvalidInstructionData);
     }
@@ -100,7 +97,6 @@ pub fn process_update_config(accounts: &mut [AccountView], data: &[u8]) -> Progr
     config_state.fee_bps = args.fee_bps;
     config_state.max_in_bps_of_vault = args.max_in_bps_of_vault;
     config_state.virtual_liquidity_multiple = args.virtual_liquidity_multiple;
-    config_state.admin = args.new_admin;
     config_state.quote_mint = args.quote_mint;
     config_state.max_outcomes = args.max_outcomes;
 

@@ -4,6 +4,7 @@
 // mistake in how an account gets validated.
 
 use pinocchio::{AccountView, Address, error::ProgramError};
+use bytemuck::{CheckedBitPattern, NoUninit, checked};
 
 use crate::error::MetisError;
 
@@ -78,6 +79,24 @@ pub fn require_addresses_match(
     }
     Ok(())
 }
+
+pub fn unpack<T: CheckedBitPattern> (
+    data: &[u8],
+    err:MetisError
+) -> Result<&T, ProgramError> {
+    checked::try_from_bytes::<T>(data).map_err(|_| err.into())
+
+}
+
+
+pub fn unpack_mut<T: CheckedBitPattern + NoUninit>(
+    data: &mut [u8],
+    err: MetisError,
+) -> Result<&mut T, ProgramError> {
+    checked::try_from_bytes_mut::<T>(data).map_err(|_| err.into())
+}
+
+
 
 // Tests for the shared account checks. To see the printed output:
 //   cargo test -p metis-core --lib validation -- --nocapture

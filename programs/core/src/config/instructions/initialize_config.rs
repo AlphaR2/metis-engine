@@ -1,4 +1,5 @@
 use bytemuck::{Pod, Zeroable, bytes_of, from_bytes};
+use metis_authority::root::RootAuthority;
 use pinocchio::{
     AccountView, Address, ProgramResult,
     cpi::{Seed, Signer},
@@ -10,8 +11,8 @@ use pinocchio_system::instructions::CreateAccount;
 use crate::{
     config::state::{CONFIG_DISCRIMINATOR, Config},
     constants::{
-        CONFIG_SEED, INITIAL_CONFIG_ADMIN, MAX_FEE_PRIMARY_BPS, MAX_OUTCOMES,
-        MAX_PRICE_IMPACT_BPS, MAX_VIRTUAL_LIQUIDITY_MULTIPLE, MIN_SEED,
+        CONFIG_SEED, GUARDIAN, MAX_FEE_PRIMARY_BPS, MAX_OUTCOMES,
+        MAX_PRICE_IMPACT_BPS, MAX_VIRTUAL_LIQUIDITY_MULTIPLE, MIN_SEED, ROOT_SIGNERS,
     },
     error::MetisError,
     validation,
@@ -24,7 +25,6 @@ pub struct InitializeConfigArgs {
     pub virtual_liquidity_multiple: u64,
     pub fee_bps: u16,
     pub max_in_bps_of_vault: u16,
-    pub admin: Address,
     pub quote_mint: Address,
     pub max_outcomes: u8,
     pub _padding: [u8; 3],
@@ -41,10 +41,9 @@ impl InitializeConfigArgs {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<InitializeConfigArgs>() == 88);
+const _: () = assert!(core::mem::size_of::<InitializeConfigArgs>() == 56);
 
 pub fn process_initialize_config(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
-
     let args = InitializeConfigArgs::load(data)?;
 
     let [authority, system_program, config] = accounts else {
@@ -55,11 +54,11 @@ pub fn process_initialize_config(accounts: &mut [AccountView], data: &[u8]) -> P
     validation::require_writable(authority, MetisError::AccountNotWritable)?;
     validation::require_writable(config, MetisError::AccountNotWritable)?;
 
-    validation::require_addresses_match(
-        authority.address(),
-        &INITIAL_CONFIG_ADMIN,
-        MetisError::WrongAccountReference,
-    )?;
+    // No Config account exists yet to read root from
+    let root = RootAuthority::new(&ROOT_SIGNERS, GUARDIAN, CONFIG_DISCRIMINATOR);
+    if !root.is_root(*authority.address()) {
+        return Err(MetisError::AuthorityMustSign.into());
+    }
 
     if system_program.address() != &pinocchio_system::ID {
         return Err(ProgramError::IncorrectProgramId);
@@ -91,7 +90,7 @@ pub fn process_initialize_config(accounts: &mut [AccountView], data: &[u8]) -> P
         return Err(ProgramError::InvalidInstructionData);
     }
 
-    let config_seeds: [&[u8]; 2] = [CONFIG_SEED, authority.address().as_ref()];
+    let config_seeds: [&[u8]; 2] = [CONFIG_SEED, GUARDIAN.as_ref()];
 
     let (config_pda, config_bump) = Address::derive_program_address(&config_seeds, &crate::ID)
         .ok_or(ProgramError::InvalidSeeds)?;
@@ -102,7 +101,7 @@ pub fn process_initialize_config(accounts: &mut [AccountView], data: &[u8]) -> P
     let bump_seed = [config_bump];
     let signer_seeds = [
         Seed::from(CONFIG_SEED),
-        Seed::from(authority.address().as_ref()),
+        Seed::from(GUARDIAN.as_ref()),
         Seed::from(bump_seed.as_ref()),
     ];
     CreateAccount {
@@ -119,12 +118,11 @@ pub fn process_initialize_config(accounts: &mut [AccountView], data: &[u8]) -> P
         fee_bps: args.fee_bps,
         max_in_bps_of_vault: args.max_in_bps_of_vault,
         virtual_liquidity_multiple: args.virtual_liquidity_multiple,
-        admin: args.admin,
+        root,
         quote_mint: args.quote_mint,
         discriminator: CONFIG_DISCRIMINATOR,
         max_outcomes: args.max_outcomes,
         bump: config_bump,
-        _padding: [0u8; 2],
     };
     config
         .try_borrow_mut()?
