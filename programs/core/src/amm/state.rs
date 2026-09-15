@@ -56,10 +56,10 @@ pub struct Market {
     pub nonce: u64,
     /// Creator of the market. Permissionless, anyone can create a market
     pub creator: Address,
-    /// The one fixed protocol authority allowed to call settle_market (see constants::AUTHORITY)
-    ///
-    /// TODO(single-point-of-failure): one keypair settling every market is not ideal so do this better afterwards
-    pub authority: Address,
+    /// The oracle/ account this market settles against
+    pub oracle: Address,
+    /// The operational key assigned to run cranks/actions for this specific market
+    pub delegate: Address,
     /// This market's USDC vault which is an SPL token account, authority = market PDA.
     pub vault: Address,
     /// The stablecoin this market is denominated in.
@@ -76,7 +76,7 @@ pub struct Market {
     pub _padding: [u8; 4],
 }
 
-const _: () = assert!(core::mem::size_of::<Market>() == 200);
+const _: () = assert!(core::mem::size_of::<Market>() == 232);
 const _: () = assert!(core::mem::align_of::<Market>() == 8);
 
 // ── Discriminators owned by this part
@@ -106,7 +106,8 @@ mod tests {
             bet_close_ts: 1_800_000_000,
             primary_end: 1_800_000_000 - crate::constants::PRIMARY_WINDOW_SECS,
             creator: Default::default(),
-            authority: Default::default(),
+            oracle: Default::default(),
+            delegate: Default::default(),
             nonce: 42,
             quote_mint: Default::default(),
             vault: Default::default(),

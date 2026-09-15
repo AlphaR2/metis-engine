@@ -15,10 +15,14 @@ use pinocchio_token::{
 use crate::{
     amm::curve::virtual_liquidity_per_side,
     amm::state::{MARKET_DISCRIMINATOR, Market, MarketStatus},
-    config::state::{CONFIG_DISCRIMINATOR, Config},
+    config::{
+        instructions::assert_amm_authority,
+        state::{CONFIG_DISCRIMINATOR, Config},
+    },
     constants::{
-        AUTHORITY, CONFIG_SEED, GUARDIAN, MARKET_SEED, MAX_OUTCOMES, OUTCOME_MINT_SEED,
-        OUTCOME_UNRESOLVED, PRIMARY_WINDOW_SECS, QUOTE_DECIMALS, VAULT_SEED,
+        CONFIG_SEED, GUARDIAN, MARKET_SEED, MAX_OUTCOMES, ORACLE_FOOTBALL_DISCRIMINATOR,
+        ORACLE_PROGRAM_ID, OUTCOME_MINT_SEED, OUTCOME_UNRESOLVED, PRIMARY_WINDOW_SECS,
+        QUOTE_DECIMALS, VAULT_SEED,
     },
     error::MetisError,
     validation,
@@ -63,16 +67,22 @@ const _: () = assert!(MAX_OUTCOMES == 2);
 ///   3 creator_quote_ata (writable, the USDC account paying the creation stake)
 ///   4 quote_mint        (the USDC mint)
 ///   5 config
-///   6 system_program
-///   7 token_program
-///   8 ata_program
+///   6 oracle            (the event this market settles against - must already exist)
+///   7 delegate          (the operational key being assigned to run this market's cranks -
+///                         root, or an address that's a currently-attested DelegatedAuthority)
+///   8 system_program
+///   9 token_program
+///   10 ata_program
 ///
 /// Two accounts per outcome follow. This list is sized for MAX_OUTCOMES == 2
 /// and must be extended by hand if that ever changes (see the assert above).
-///   9  outcome_mint_0    (writable, PDA)
-///   10 creator_ata_0     (writable, where the creator's outcome 0 shares land)
-///   11 outcome_mint_1    (writable, PDA)
-///   12 creator_ata_1     (writable, where the creator's outcome 1 shares land)
+///   11 outcome_mint_0    (writable, PDA)
+///   12 creator_ata_0     (writable, where the creator's outcome 0 shares land)
+///   13 outcome_mint_1    (writable, PDA)
+///   14 creator_ata_1     (writable, where the creator's outcome 1 shares land)
+///
+/// One optional trailing account: delegate's own DelegatedAuthority PDA, required unless
+/// `delegate` is root.
 pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let args = InitializeMarketArgs::load(data)?;
 
@@ -85,6 +95,8 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
         creator_quote_ata,
         quote_mint,
         config,
+        oracle,
+        delegate,
         system_program,
         token_program,
         ata_program,
@@ -92,10 +104,15 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
         creator_ata_0,
         outcome_mint_1,
         creator_ata_1,
+        remaining @ ..,
     ] = accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
+
+    if remaining.len() > 1 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
 
     // Put the per-outcome accounts into arrays so the loop further down can
     // just index by outcome number instead of repeating itself per outcome.
@@ -145,8 +162,9 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
     //   max_outcomes    - admin-set ceiling on outcomes per market
     //   quote_mint      - the only stablecoin markets may be priced in
     //   virtual_liquidity_multiple - how many times the creator's stake is multiplied to give the market a starting shape
+    //   config_value    - the whole Config struct, for passing to assert_amm_authority
 
-    let (market_init_fee, max_outcomes, cfg_quote_mint, virtual_liquidity_multiple) = {
+    let (market_init_fee, max_outcomes, cfg_quote_mint, virtual_liquidity_multiple, config_value) = {
         let config_data = config.try_borrow()?;
         let config_state =
             validation::unpack::<Config>(&config_data, MetisError::InvalidConfigAccount)?;
@@ -156,6 +174,7 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
             config_state.max_outcomes,
             config_state.quote_mint,
             config_state.virtual_liquidity_multiple,
+            *config_state,
         )
     };
 
@@ -166,6 +185,28 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
         &cfg_quote_mint,
         MetisError::WrongAccountReference,
     )?;
+
+    // The oracle must already be a real, existing FootballSettled account owned by the real
+    // oracle program - proves this market can't attach to a fake or nonexistent event. Ownership
+    // alone isn't enough to tell a FootballSettled apart from oracle's own RootAuthority/
+    // DelegatedAuthority accounts (all owned by the same program), so the discriminator - the
+    // last 8 bytes of a FootballSettled account, since discriminator is that struct's last field
+    if !oracle.owned_by(&ORACLE_PROGRAM_ID) {
+        return Err(MetisError::InvalidAuthorityAccount.into());
+    }
+    {
+        let oracle_data = oracle.try_borrow()?;
+        let len = oracle_data.len();
+        if len < 8 || oracle_data[len - 8..] != ORACLE_FOOTBALL_DISCRIMINATOR {
+            return Err(MetisError::InvalidAuthorityAccount.into());
+        }
+    }
+
+    // Whoever the creator is assigning as this market's delegate must actually be legitimate -
+    // root, or a currently-attested DelegatedAuthority. Doesn't need to sign this transaction
+    // (it's being recorded, not acting), so it's checked the same way attest_authority checks a
+    // non-root attester's own standing.
+    assert_amm_authority(delegate, remaining.first(), &config_value)?;
 
     // Outcomes must be at least 2: a one-outcome market has a guaranteed
     // winner and nothing to price. The upper bound is whichever is stricter,
@@ -385,7 +426,8 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
         primary_end,
         nonce: args.nonce,
         creator: *creator.address(),
-        authority: AUTHORITY,
+        oracle: *oracle.address(),
+        delegate: *delegate.address(),
         vault: *vault.address(),
         quote_mint: *quote_mint.address(),
         discriminator: MARKET_DISCRIMINATOR,

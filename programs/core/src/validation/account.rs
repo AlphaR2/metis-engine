@@ -133,8 +133,8 @@ mod tests {
     // check here is how a bettor ends up credited on someone else's market.
     #[test]
     fn address_match_check_accepts_equal_and_rejects_different() {
-        let a = crate::constants::AUTHORITY;
-        let b = crate::constants::AUTHORITY;
+        let a = crate::constants::GUARDIAN;
+        let b = crate::constants::GUARDIAN;
         println!("same address {a} -> accepted");
         assert!(require_addresses_match(&a, &b, MetisError::WrongAccountReference).is_ok());
 

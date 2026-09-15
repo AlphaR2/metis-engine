@@ -74,7 +74,7 @@ const _: () = assert!(MAX_PRICE_IMPACT_BPS <= BPS_DENOMINATOR);
 
 // Swap this for a real
 // production key (and a real keypair to match) before any real deploy.
-pub const AUTHORITY: Address = address!("eaZoYS1Ej58sL64S3PtZbo7XS5euS7oTC1CzsEmP6VE");
+// pub const AUTHORITY: Address = address!("eaZoYS1Ej58sL64S3PtZbo7XS5euS7oTC1CzsEmP6VE");
 
 // Root authority keys - same 3 signers as oracle/, so both programs share one trust root
 
@@ -87,3 +87,14 @@ pub const ROOT_SIGNERS: [Address; 3] = [
 // PLACEHOLDER — must be a real, independently-held keypair before any real deploy, distinct
 // from all three ROOT_SIGNERS. Same address as oracle's GUARDIAN placeholder, same caveat.
 pub const GUARDIAN: Address = address!("eaZoYS1Ej58sL64S3PtZbo7XS5euS7oTC1CzsEmP6VE");
+
+// ── Cross-program references (oracle/) 
+// NOTE: Fix with real value on initial deploy. 
+// oracle is a separate program - reading its accounts is a plain byte-level read (no CPI
+// needed for reads, only writes), but this program has no dependency on oracle's crate, so
+// these values are independently declared here rather than imported. Must be kept in sync by
+// hand with oracle/src/lib.rs's declare_id! and oracle/src/constants.rs's
+// FOOTBALL_SETTLED_DISCRIMINATOR - same "shared logic, not shared data" principle as
+// ROOT_SIGNERS/GUARDIAN above.
+pub const ORACLE_PROGRAM_ID: Address = address!("PorC1q7btDTY3jyrNxCgieXU5a4nGzhchjjnThYM3un");
+pub const ORACLE_FOOTBALL_DISCRIMINATOR: [u8; 8] = [130, 33, 121, 117, 222, 174, 224, 194];

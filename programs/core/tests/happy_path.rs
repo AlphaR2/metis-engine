@@ -42,14 +42,14 @@ fn initialize_config_then_market_then_bet_then_settle_then_claim() {
     let bettor_shares = token_balance(&svm, &outcome_ata(&market.market, &bettor.pubkey(), 0));
     assert!(bettor_shares > 0, "bettor should hold outcome-0 shares after betting");
 
-    // settle_market - advance past kickoff, authority declares outcome 0 the winner
+    // settle_market - advance past kickoff, the market's own delegate (root_signer(0), set at
+    // open_market_with_config) declares outcome 0 the winner. No real keypair for it, so this
+    // goes through send_as like every other root/delegate-authorized call in these tests.
     advance_clock_past(&mut svm, market.bet_close_ts);
-    let authority = authority_keypair();
-    send(
+    send_as(
         &mut svm,
-        ix_settle_market(&market.market, &market.vault, &authority.pubkey(), 0),
-        &authority,
-        &[],
+        ix_settle_market(&market.market, &market.vault, &market.delegate, 0, &market.config),
+        market.delegate,
     )
     .expect("settle_market should succeed");
 
@@ -72,8 +72,8 @@ fn initialize_config_then_market_then_bet_then_settle_then_claim() {
     );
 
     // update_config - confirm the root-authorized path still works end to end too. Sent "as"
-    // one of Config.root's ROOT_SIGNERS, not the settle_market `authority` above - those are
-    // two separate authorization checks (Market.authority vs. Config.root).
+    // one of Config.root's ROOT_SIGNERS - same root that also settled the market above, since
+    // this market's delegate happens to be root_signer(0).
     let root = root_signer(0);
     send_as(
         &mut svm,

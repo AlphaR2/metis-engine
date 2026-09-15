@@ -14,7 +14,7 @@ use solana_sdk::{
     account::Account,
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
-    signature::{Keypair, Signer, read_keypair_file},
+    signature::{Keypair, Signer},
     transaction::Transaction,
 };
 use std::str::FromStr;
@@ -25,8 +25,9 @@ use metis_core::{
         initialize_config::InitializeConfigArgs, update_config::UpdateConfigArgs,
     },
     constants::{
-        CONFIG_SEED, MARKET_SEED, MAX_OUTCOMES, MIN_SEED, OUTCOME_MINT_SEED,
-        PRIMARY_WINDOW_SECS, QUOTE_DECIMALS, ROOT_SIGNERS, VAULT_SEED, VIRTUAL_LIQUIDITY_MULTIPLE,
+        CONFIG_SEED, MARKET_SEED, MAX_OUTCOMES, MIN_SEED, ORACLE_FOOTBALL_DISCRIMINATOR,
+        ORACLE_PROGRAM_ID, OUTCOME_MINT_SEED, PRIMARY_WINDOW_SECS, QUOTE_DECIMALS, ROOT_SIGNERS,
+        VAULT_SEED, VIRTUAL_LIQUIDITY_MULTIPLE,
     },
     settlement::instructions::settle_market::SettleMarketArgs,
 };
@@ -288,25 +289,6 @@ pub fn primary_end_of(bet_close_ts: i64) -> i64 {
     bet_close_ts - PRIMARY_WINDOW_SECS
 }
 
-// The settle_market authority — constants::AUTHORITY in the real program.
-// Tests that need to actually settle a market (not just prove the wrong
-// signer gets rejected) need the private key for that exact pubkey, which
-// nobody but whoever generated it holds — not something to bake into the
-// repo. Point this at wherever that keypair file actually lives; never
-// commit the file itself.
-pub fn authority_keypair() -> Keypair {
-    let path = std::env::var("METIS_AUTHORITY_KEYPAIR")
-        .unwrap_or_else(|_| "keys/authority.json".to_string());
-    read_keypair_file(&path).unwrap_or_else(|_| {
-        panic!(
-            "couldn't load the authority keypair from {path} \
-             (set METIS_AUTHORITY_KEYPAIR, or place it at keys/authority.json) — \
-             this must be the keypair for {}, matching constants::AUTHORITY",
-            metis_core::constants::AUTHORITY,
-        )
-    })
-}
-
 // One of Config.root's own ROOT_SIGNERS - a vanity address with no known matching private key,
 // same situation as oracle/'s tests. No Keypair needed at all: send_as() builds an unsigned
 // transaction naming this pubkey as signer, and setup()'s LiteSVM has sigverify disabled to
@@ -373,6 +355,7 @@ pub const FAR_FUTURE_CLOSE: i64 = i64::MAX / 2;
 // the instruction's own account list 1:1 so a mismatch is easy to spot,
 // rather than being hidden inside a builder struct.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn ix_initialize_market(
     creator: &Pubkey,
     creator_quote_ata: &Pubkey,
@@ -382,6 +365,8 @@ pub fn ix_initialize_market(
     num_outcomes: u8,
     bet_close_ts: i64,
     config: &Pubkey,
+    oracle: &Pubkey,
+    delegate: &Pubkey,
 ) -> Instruction {
     let args = InitializeMarketArgs {
         nonce,
@@ -404,6 +389,8 @@ pub fn ix_initialize_market(
             AccountMeta::new(*creator_quote_ata, false),
             AccountMeta::new_readonly(usdc_mint(), false),
             AccountMeta::new_readonly(*config, false),
+            AccountMeta::new_readonly(*oracle, false),
+            AccountMeta::new_readonly(*delegate, false),
             AccountMeta::new_readonly(solana_system_interface::program::ID, false),
             AccountMeta::new_readonly(token_program_id(), false),
             AccountMeta::new_readonly(ata_program_id(), false),
@@ -412,6 +399,7 @@ pub fn ix_initialize_market(
             AccountMeta::new(ata(creator, &mint_0), false),
             AccountMeta::new(mint_1, false),
             AccountMeta::new(ata(creator, &mint_1), false),
+            // delegate is root in tests, so the optional DelegatedAuthority account is omitted.
         ],
         data,
     }
@@ -463,6 +451,7 @@ pub fn ix_settle_market(
     vault: &Pubkey,
     authority: &Pubkey,
     winning_outcome: u8,
+    config: &Pubkey,
 ) -> Instruction {
     let args = SettleMarketArgs {
         winning_outcome,
@@ -477,6 +466,7 @@ pub fn ix_settle_market(
             AccountMeta::new(*market, false),
             AccountMeta::new_readonly(*vault, false),
             AccountMeta::new_readonly(*authority, true),
+            AccountMeta::new_readonly(*config, false),
         ],
         data,
     }
@@ -641,6 +631,8 @@ pub struct TestMarket {
     pub market: Pubkey,
     pub vault: Pubkey,
     pub config: Pubkey,
+    pub oracle: Pubkey,
+    pub delegate: Pubkey,
     pub bet_close_ts: i64,
 }
 
@@ -657,6 +649,28 @@ pub fn open_market_default(svm: &mut LiteSVM, nonce: u64) -> TestMarket {
     open_market(svm, nonce, bet_close_ts)
 }
 
+// A minimal fake oracle account for tests that only need initialize_market's ownership +
+// discriminator check to pass - not a real FootballSettled, since nothing reads its actual
+// score/status data yet (that wiring is deliberately deferred). Owner + the last 8 bytes
+// (discriminator) is all initialize_market currently checks.
+pub fn fake_oracle_account(svm: &mut LiteSVM) -> Pubkey {
+    let oracle = Pubkey::new_unique();
+    let mut data = vec![0u8; 64];
+    let len = data.len();
+    data[len - 8..].copy_from_slice(&ORACLE_FOOTBALL_DISCRIMINATOR);
+    svm.set_account(
+        oracle,
+        Account {
+            lamports: 1_000_000,
+            data,
+            owner: Pubkey::new_from_array(ORACLE_PROGRAM_ID.to_bytes()),
+            ..Default::default()
+        },
+    )
+    .expect("fake oracle account is seeded");
+    oracle
+}
+
 pub fn open_market_with_config(
     svm: &mut LiteSVM,
     nonce: u64,
@@ -666,6 +680,8 @@ pub fn open_market_with_config(
     let (creator, creator_quote_ata) = funded_bettor(svm, 100 * MIN_SEED);
     let (market, _) = market_pda(&creator.pubkey(), nonce);
     let (vault, _) = vault_pda(&market);
+    let oracle = fake_oracle_account(svm);
+    let delegate = root_signer(0);
 
     send(
         svm,
@@ -678,6 +694,8 @@ pub fn open_market_with_config(
             2,
             bet_close_ts,
             &config,
+            &oracle,
+            &delegate,
         ),
         &creator,
         &[],
@@ -690,6 +708,8 @@ pub fn open_market_with_config(
         market,
         vault,
         config,
+        oracle,
+        delegate,
         bet_close_ts,
     }
 }

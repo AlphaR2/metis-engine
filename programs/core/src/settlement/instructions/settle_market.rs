@@ -2,7 +2,7 @@
 
 use bytemuck::{Pod, Zeroable, from_bytes, from_bytes_mut};
 use pinocchio::{
-    AccountView, ProgramResult,
+    AccountView, Address, ProgramResult,
     error::ProgramError,
     sysvars::{Sysvar, clock::Clock},
 };
@@ -10,6 +10,8 @@ use pinocchio_token::state::Account;
 
 use crate::{
     amm::state::{MARKET_DISCRIMINATOR, Market, MarketStatus},
+    config::state::{CONFIG_DISCRIMINATOR, Config},
+    constants::{CONFIG_SEED, GUARDIAN},
     error::MetisError,
     validation,
 };
@@ -37,16 +39,19 @@ const _: () = assert!(core::mem::size_of::<SettleMarketArgs>() == 8);
 /// Accounts:
 ///   0 market    (writable)
 ///   1 vault     (the market's USDC account, read only here)
-///   2 authority (signer)
-///   3 oracle
+///   2 authority (signer - Config.root, or this market's own recorded delegate)
+///   3 config
 ///
-/// Records which outcome actually happened. No pricing runs here - the curve
-/// is finished by this point and never looked at again. All this does is write
-/// down the winner so claims can start.
+
+///
+/// winning_outcome is still a bare trusted argument here - reading it from the linked oracle
+/// account (market_state.oracle) instead is deliberately deferred, real product/game logic
+/// (how a condition maps to an outcome) not settled yet. What changed is only who's allowed to
+/// call this: the old fixed constants::AUTHORITY single key is gone.
 pub fn process_settle_market(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let args = SettleMarketArgs::load(data)?;
 
-    let [market, vault, authority] = accounts else {
+    let [market, vault, authority, config] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
@@ -59,20 +64,35 @@ pub fn process_settle_market(accounts: &mut [AccountView], data: &[u8]) -> Progr
         MetisError::InvalidMarketAccount,
     )?;
 
+    let (config_pda, _) =
+        Address::derive_program_address(&[CONFIG_SEED, GUARDIAN.as_ref()], &crate::ID)
+            .ok_or(MetisError::InvalidPda)?;
+    validation::require_addresses_match(config.address(), &config_pda, MetisError::InvalidPda)?;
+    validation::require_initialized_and_owned(
+        config,
+        &crate::ID,
+        false,
+        MetisError::InvalidConfigAccount,
+    )?;
+    let config_data = config.try_borrow()?;
+    let config_state =
+        validation::unpack::<Config>(&config_data, MetisError::InvalidConfigAccount)?;
+    validation::require_discriminator(config_state.discriminator, CONFIG_DISCRIMINATOR)?;
+
     let mut market_data = market.try_borrow_mut()?;
     let market_state: &mut Market = from_bytes_mut(&mut market_data);
 
     validation::require_discriminator(market_state.discriminator, MARKET_DISCRIMINATOR)?;
 
-    // Only the market's own recorded authority can settle it.
-    // TODO(single-point-of-failure): this single-signer check is the part
-    // planned to be replaced by an oracle system
-    // for now use authority
-    validation::require_addresses_match(
-        authority.address(),
-        &market_state.authority,
-        MetisError::WrongAccountReference,
-    )?;
+    // Root can always settle; otherwise the signer must be exactly this market's own recorded
+    // delegate - not just any currently-attested key. Assignment already proved that address
+    // was legitimate back at initialize_market, so no re-check against a DelegatedAuthority
+    // account is needed here, just a direct match.
+    if !config_state.root.is_root(*authority.address())
+        && *authority.address() != market_state.delegate
+    {
+        return Err(MetisError::UnauthorizedAuthority.into());
+    }
 
     // Covers Uninitialized and already-Settled in one check.
     let current_status = MarketStatus::try_from(market_state.status)?;
