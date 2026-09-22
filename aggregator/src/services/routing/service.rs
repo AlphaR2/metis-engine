@@ -1,0 +1,161 @@
+//! The smart router: given a canonical outcome and a trade size, queries every venue backing it,
+//! scores the candidates under a pluggable `RoutingStrategy`, and returns a `Recommendation` —
+//! the actual `find_best_market(event, outcome, size, strategy)` primitive from the design doc.
+//! Data shapes (`RoutingCandidate`, `ScoredCandidate`, `Recommendation`) live in
+//! `crate::models::routing`; the actual scoring math lives in `crate::services::maths::routing`;
+//! this module is the orchestration in between.
+
+use rust_decimal::Decimal;
+
+use crate::errors::RoutingError;
+use crate::models::event::VenueMarketRef;
+use crate::models::routing::{Recommendation, RoutingCandidate, ScoredCandidate};
+use crate::repositories::health_repository::HealthRegistry;
+use crate::services::VenueAdapter;
+use crate::services::maths::routing as maths;
+
+/// A pluggable way to rank venue candidates - price, liquidity, or a blend.
+pub trait RoutingStrategy: Send + Sync {
+    /// The strategy's own name, e.g. "best_price". Part of the trait contract for logging and
+    /// future response annotation; `strategy_by_name` maps the other direction.
+    #[allow(dead_code)]
+    fn name(&self) -> &'static str;
+    /// Ranks `candidates` best-first. Implementations should treat an unroutable (unhealthy)
+    /// candidate as always-worse than a routable one, regardless of its price.
+    fn rank(&self, candidates: &[RoutingCandidate]) -> Vec<ScoredCandidate>;
+}
+
+/// Ranks purely by lowest price.
+pub struct BestPrice;
+impl RoutingStrategy for BestPrice {
+    fn name(&self) -> &'static str {
+        "best_price"
+    }
+    fn rank(&self, candidates: &[RoutingCandidate]) -> Vec<ScoredCandidate> {
+        maths::score_best_price(candidates)
+    }
+}
+
+/// Ranks by how much size a venue can actually fill.
+pub struct BestLiquidity;
+impl RoutingStrategy for BestLiquidity {
+    fn name(&self) -> &'static str {
+        "best_liquidity"
+    }
+    fn rank(&self, candidates: &[RoutingCandidate]) -> Vec<ScoredCandidate> {
+        maths::score_best_liquidity(candidates)
+    }
+}
+
+/// Ranks by whether the full requested size can be filled at all.
+pub struct BestExecution;
+impl RoutingStrategy for BestExecution {
+    fn name(&self) -> &'static str {
+        "best_execution"
+    }
+    fn rank(&self, candidates: &[RoutingCandidate]) -> Vec<ScoredCandidate> {
+        maths::score_best_execution(candidates)
+    }
+}
+
+/// The default: a weighted blend of price, liquidity, and fillability.
+pub struct BestOverall;
+impl RoutingStrategy for BestOverall {
+    fn name(&self) -> &'static str {
+        "best_overall"
+    }
+    fn rank(&self, candidates: &[RoutingCandidate]) -> Vec<ScoredCandidate> {
+        maths::score_best_overall(candidates)
+    }
+}
+
+/// Picks a strategy by its name string, defaulting to `BestOverall`.
+pub fn strategy_by_name(name: Option<&str>) -> Box<dyn RoutingStrategy> {
+    match name {
+        Some("best_price") => Box::new(BestPrice),
+        Some("best_liquidity") => Box::new(BestLiquidity),
+        Some("best_execution") => Box::new(BestExecution),
+        _ => Box::new(BestOverall),
+    }
+}
+
+/// Queries every venue backing `outcome_id`, builds `RoutingCandidate`s, and ranks them under
+/// `strategy`. `venue_lookup` maps a venue_id to the adapter to query - the router doesn't own
+/// adapters itself, `Aggregator` does.
+pub async fn find_best_market(
+    venue_refs: &[VenueMarketRef],
+    size_usdc: &str,
+    strategy: &dyn RoutingStrategy,
+    venue_lookup: impl Fn(&str) -> Option<std::sync::Arc<dyn VenueAdapter>>,
+    health: &HealthRegistry,
+) -> Result<Recommendation, RoutingError> {
+    if venue_refs.is_empty() {
+        return Err(RoutingError::NoVenuesForOutcome("no venue markets provided".to_string()));
+    }
+
+    let requested_size: Decimal = size_usdc.parse().unwrap_or(Decimal::ZERO);
+
+    // Quote every venue concurrently. These are independent network calls against different
+    // hosts; running them in sequence put (venue count x per-request timeout) on a user-facing
+    // request for no reason.
+    let quoted = futures::future::join_all(venue_refs.iter().map(|venue_ref| {
+        let adapter = venue_lookup(&venue_ref.venue_id);
+        async move {
+            let adapter = adapter?;
+            // The adapter's own `.id()` is the canonical &'static str for this venue - used for
+            // health tracking/lookups instead of `venue_ref.venue_id` (a plain String, since it
+            // also has to round-trip through JSON on the canonical graph's API responses).
+            let venue_id = adapter.id();
+
+            // `venue_ref.venue_side` is this venue's own native side for the outcome being
+            // requested ("yes"/"no" for Panta/Jupiter, "long"/"short" for Pascal) - never a single
+            // side string reused across venues, since the same canonical outcome maps to different
+            // native terms per venue.
+            match adapter.quote(&venue_ref.venue_market_id, venue_ref.venue_side.as_str(), requested_size).await {
+                Ok(quote) => {
+                    health.record_success(venue_id);
+                    Some(RoutingCandidate {
+                        venue_id,
+                        venue_market_id: venue_ref.venue_market_id.clone(),
+                        price: quote.avg_price,
+                        executable_size: quote.effective_shares_or_size,
+                        // The adapter already knows whether the whole amount filled - taking its
+                        // answer instead of re-deriving one from rounded size x price.
+                        fully_executable: quote.fully_filled,
+                        fee_usdc: quote.fee_usdc,
+                        routable: health.is_routable(venue_id),
+                    })
+                }
+                Err(err) => {
+                    // A market with no depth is the venue answering correctly, not failing -
+                    // counting it would take a healthy venue out of routing after a few thin
+                    // markets.
+                    if !err.is_business_outcome() {
+                        health.record_failure(venue_id, err.to_string());
+                    }
+                    None
+                }
+            }
+        }
+    }))
+    .await;
+
+    let candidates: Vec<RoutingCandidate> = quoted.into_iter().flatten().collect();
+
+    if candidates.is_empty() {
+        return Err(RoutingError::NoQuotesAvailable);
+    }
+
+    let ranked = strategy.rank(&candidates);
+    let best = ranked.first().expect("candidates non-empty implies ranked non-empty");
+
+    Ok(Recommendation {
+        venue_id: best.candidate.venue_id,
+        venue_market_id: best.candidate.venue_market_id.clone(),
+        price: best.candidate.price,
+        executable_size: best.candidate.executable_size,
+        fees: best.candidate.fee_usdc,
+        execution: if best.candidate.fully_executable { "available" } else { "partial" },
+        comparison: ranked,
+    })
+}
