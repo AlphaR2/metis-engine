@@ -1,0 +1,15 @@
+categories-probe	404	prediction/v1/categories
+events-all	200	prediction/v1/events?start=0&end=50&includeMarkets=true&sortBy=volume&sortDirection=desc
+events-crypto	200	prediction/v1/events?start=0&end=50&includeMarkets=true&sortBy=volume&sortDirection=desc&category=crypto
+events-sports	200	prediction/v1/events?start=0&end=50&includeMarkets=true&sortBy=volume&sortDirection=desc&category=sports
+events-politics	200	prediction/v1/events?start=0&end=50&includeMarkets=true&sortBy=volume&sortDirection=desc&category=politics
+events-esports	200	prediction/v1/events?start=0&end=50&includeMarkets=true&sortBy=volume&sortDirection=desc&category=esports
+events-culture	200	prediction/v1/events?start=0&end=50&includeMarkets=true&sortBy=volume&sortDirection=desc&category=culture
+events-economics	200	prediction/v1/events?start=0&end=50&includeMarkets=true&sortBy=volume&sortDirection=desc&category=economics
+events-tech	200	prediction/v1/events?start=0&end=50&includeMarkets=true&sortBy=volume&sortDirection=desc&category=tech
+events-finance	200	prediction/v1/events?start=0&end=50&includeMarkets=true&sortBy=volume&sortDirection=desc&category=finance
+events-climate___science	200	prediction/v1/events?start=0&end=50&includeMarkets=true&sortBy=volume&sortDirection=desc&category=climate%20%26%20science
+events-weather	200	prediction/v1/events?start=0&end=50&includeMarkets=true&sortBy=volume&sortDirection=desc&category=weather
+events-mentions	200	prediction/v1/events?start=0&end=50&includeMarkets=true&sortBy=volume&sortDirection=desc&category=mentions
+market-POLY-898412	200	prediction/v1/markets/POLY-898412
+orderbook-POLY-898412	200	prediction/v1/orderbook/POLY-898412

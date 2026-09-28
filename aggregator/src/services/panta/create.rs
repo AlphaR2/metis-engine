@@ -21,8 +21,8 @@ use crate::models::execution::{
 use crate::models::venue::Category;
 use crate::models::venue::panta::{
     PantaCreateBuildRequest, PantaCreateBuildResponse, PantaCreateQuoteRequest,
-    PantaCreateQuoteResponse, PantaRegisterRequest, PantaRegisterResponse, category_to_native,
-    supported_categories, usdc_base_units_to_decimal,
+    CREATE_CATEGORIES, PantaCreateQuoteResponse, PantaRegisterRequest, PantaRegisterResponse,
+    usdc_base_units_to_decimal,
 };
 use crate::utils::http::parse_json_with_diagnostics;
 use crate::utils::time::now_unix;
@@ -103,14 +103,20 @@ fn validate(intent: &CreateMarketIntent, now: i64) -> Result<(), AdapterError> {
         return invalid("resolutionTime must be after endTime".into());
     }
 
-    if category_to_native(&Category::from(intent.category.clone())).is_none() {
+    if native_create_category(&intent.category).is_none() {
         return invalid(format!(
             "Panta has no '{}' category — it accepts {}",
             intent.category,
-            supported_categories().join(", ")
+            CREATE_CATEGORIES.join(", ")
         ));
     }
     Ok(())
+}
+
+/// Panta's own spelling of `requested`, if creation accepts it.
+fn native_create_category(requested: &str) -> Option<&'static str> {
+    let requested = Category::from(requested);
+    CREATE_CATEGORIES.into_iter().find(|c| Category::from(*c) == requested)
 }
 
 /// Builds the itemized cost from whichever figures Panta returned.
@@ -153,8 +159,8 @@ pub async fn build_create_market(
     let now = now_unix();
     validate(intent, now)?;
 
-    let native_category = category_to_native(&Category::from(intent.category.clone()))
-        .expect("validate() already rejected unsupported categories");
+    let native_category =
+        native_create_category(&intent.category).expect("validate() already rejected unsupported categories");
 
     // ── 1. Quote ────────────────────────────────────────────────────────────────────────────
     let quote_body = PantaCreateQuoteRequest {
@@ -261,10 +267,19 @@ pub async fn register(
         // Panta fails closed with named codes - CREATE_EXPIRED, TX_NOT_FOUND, TX_FAILED,
         // TX_MISMATCH, TX_FEE_MISMATCH, INVALID_MARKET_PARAMS, RATE_LIMITED. Each says something
         // different and actionable, so the body is passed through rather than flattened.
-        let expired = text.contains("CREATE_EXPIRED");
+        //
+        // RATE_LIMITED says nothing about the transaction itself: it is still in flight, so it
+        // stays pending and the caller retries, rather than being told it failed.
+        let status = if text.contains("CREATE_EXPIRED") {
+            ActionStatus::Expired
+        } else if text.contains("RATE_LIMITED") || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            ActionStatus::Submitted
+        } else {
+            ActionStatus::Failed
+        };
         return Ok(ConfirmOutcome {
             venue_ref: create_id.to_string(),
-            status: if expired { ActionStatus::Expired } else { ActionStatus::Failed },
+            status,
             venue_market_id: None,
             message: Some(text),
         });

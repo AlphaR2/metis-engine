@@ -14,7 +14,7 @@ use crate::state::AppState;
     request_body = FindBestMarketRequest,
     responses(
         (status = 200, body = Recommendation, description = "Best venue for this outcome/size under the chosen strategy, plus the full comparison set."),
-        (status = 400, description = "size_usdc wasn't a positive number"),
+        (status = 400, description = "size_usdc wasn't a positive number, or strategy is unknown"),
         (status = 404, description = "No venue markets back this event/outcome"),
         (status = 502, description = "Every venue failed to quote"),
     )
@@ -28,6 +28,7 @@ pub async fn find_best_market_route(
         Ok(size) if size > Decimal::ZERO => {}
         _ => return Err(ApiError::BadRequest(format!("size_usdc must be a positive number, got '{}'", req.size_usdc))),
     }
+    let strategy = strategy_by_name(req.strategy.as_deref()).map_err(ApiError::BadRequest)?;
 
     let venue_refs = {
         let graph = state.aggregator.graph.read().await;
@@ -41,14 +42,13 @@ pub async fn find_best_market_route(
         )));
     }
 
-    let strategy = strategy_by_name(req.strategy.as_deref());
-
     let recommendation = find_best_market(
         &venue_refs,
         &req.size_usdc,
         strategy.as_ref(),
-        |venue_id| state.aggregator.venues.iter().find(|v| v.id() == venue_id).cloned(),
+        |venue_id| state.aggregator.venue(venue_id),
         &state.aggregator.health,
+        &state.aggregator.quotes,
     )
     .await?;
 

@@ -5,9 +5,9 @@
 use rust_decimal::Decimal;
 
 use crate::errors::AdapterError;
-use crate::models::venue::panta::{PantaListResponse, PantaMarketRow, PantaQuoteResponse};
-use crate::models::venue::{ListParams, MarketPage, VenueMarket, VenueQuote};
-use crate::utils::http::parse_json_with_diagnostics;
+use crate::models::venue::panta::{PantaCategoriesResponse, PantaListResponse, PantaMarketRow, PantaQuoteResponse};
+use crate::models::venue::{ListParams, VenueQuote};
+use crate::utils::http::{parse_json_with_diagnostics, venue_url_dir, venue_url_for_path};
 
 /// Panta's documented max page size (default is 20 if unset) - requesting the max cuts the number
 /// of round trips (and thus total refresh time) roughly 2.5x for the same catalog.
@@ -22,18 +22,18 @@ const PAGE_LIMIT: &str = "50";
 /// What *is* honoured is `category` (confirmed: sports/crypto/politics each return only their own
 /// rows) and `limit`. Everything else - dropping resolved/cancelled/secondary rows, the betting
 /// window - is enforced client-side by `VenueMarket::is_bettable`.
-/// Calls Panta's `GET /markets/` and returns one page of `primary`-phase markets.
+/// Calls Panta's `GET /markets/` and returns one page of raw rows and the next cursor.
 pub async fn list_markets(
     client: &reqwest::Client,
     base_url: &str,
     api_key: &str,
     params: ListParams,
-) -> Result<MarketPage, AdapterError> {
+) -> Result<(Vec<PantaMarketRow>, Option<String>), AdapterError> {
     let mut query: Vec<(&str, String)> = vec![("limit", PAGE_LIMIT.to_string())];
-    if let Some(category) = params.category
-        && let Some(native) = crate::models::venue::panta::category_to_native(&category) {
-            query.push(("category", native.to_string()));
-        }
+    if let Some(category) = params.category {
+        // Panta's own spelling, as its `/categories/` returned it.
+        query.push(("category", category));
+    }
     if let Some(cursor) = params.cursor {
         query.push(("cursor", cursor));
     }
@@ -51,19 +51,38 @@ pub async fn list_markets(
         .await
         .map_err(AdapterError::Parse)?;
 
-    Ok(MarketPage { items: response.items.into_iter().map(Into::into).collect(), next_cursor: response.next_cursor })
+    Ok((response.items, response.next_cursor))
 }
 
-/// Calls Panta's `GET /markets/{id}/` for one market.
-#[allow(dead_code)] // adapter contract; no single-market route yet
-pub async fn get_market(
+/// Calls Panta's `GET /categories/` - the names its `category` filter accepts.
+pub async fn list_categories(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<String>, AdapterError> {
+    let response = client
+        .get(venue_url_dir(base_url, &["categories"])?)
+        .header("X-Api-Key", api_key)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| AdapterError::Venue(e.to_string()))?;
+    let response: PantaCategoriesResponse = parse_json_with_diagnostics(response, "panta list_categories")
+        .await
+        .map_err(AdapterError::Parse)?;
+    Ok(response.categories)
+}
+
+/// Calls Panta's `GET /markets/{id}/` for one market - the only place its question, rules and
+/// sources appear.
+pub async fn get_market_row(
     client: &reqwest::Client,
     base_url: &str,
     api_key: &str,
     venue_market_id: &str,
-) -> Result<VenueMarket, AdapterError> {
+) -> Result<PantaMarketRow, AdapterError> {
     let response = client
-        .get(format!("{base_url}/markets/{venue_market_id}/"))
+        .get(venue_url_dir(base_url, &["markets", venue_market_id])?)
         .header("X-Api-Key", api_key)
         .send()
         .await?;
@@ -73,10 +92,7 @@ pub async fn get_market(
     }
 
     let response = response.error_for_status().map_err(|e| AdapterError::Venue(e.to_string()))?;
-    let row: PantaMarketRow =
-        parse_json_with_diagnostics(response, "panta get_market").await.map_err(AdapterError::Parse)?;
-
-    Ok(row.into())
+    parse_json_with_diagnostics(response, "panta get_market").await.map_err(AdapterError::Parse)
 }
 
 /// Calls Panta's `POST /primaryorderquote/` for a fill estimate.
@@ -136,13 +152,13 @@ pub async fn raw_get(
     api_key: &str,
     path: &str,
     query: &[(String, String)],
-) -> Result<String, AdapterError> {
-    let path = path.trim_start_matches('/');
+) -> Result<(u16, String), AdapterError> {
     let response = client
-        .get(format!("{base_url}/{path}"))
+        .get(venue_url_for_path(base_url, path)?)
         .header("X-Api-Key", api_key)
         .query(query)
         .send()
         .await?;
-    response.text().await.map_err(AdapterError::Http)
+    let status = response.status().as_u16();
+    Ok((status, response.text().await.map_err(AdapterError::Http)?))
 }

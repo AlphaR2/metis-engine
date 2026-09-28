@@ -14,7 +14,7 @@ use rust_decimal::Decimal;
 use crate::errors::AdapterError;
 use crate::models::execution::{BuyIntent, ConfirmOutcome, UnsignedTransaction};
 use crate::models::venue::{
-    Category, ListParams, MarketPage, OutcomeFraming, TradingModel, VenueCapabilities, VenueMarket, VenueQuote,
+    ListParams, MarketPage, OutcomeFraming, TradingModel, VenueCapabilities, VenueMarket, VenueQuote,
 };
 use crate::services::VenueAdapter;
 use crate::services::maths::orderbook::{Level, walk_book};
@@ -71,8 +71,11 @@ impl VenueAdapter for JupiterAdapter {
         }
     }
 
-    fn native_category(&self, category: &Category) -> Option<String> {
-        crate::models::venue::jupiter::category_to_native(category).map(str::to_string)
+    /// Jupiter has no categories endpoint, so its filter vocabulary is the one piece of venue
+    /// knowledge kept in code (`FILTER_CATEGORIES`). The refresh's unfiltered sweep still picks
+    /// up any category it adds.
+    async fn filter_categories(&self) -> Result<Vec<String>, AdapterError> {
+        Ok(crate::models::venue::jupiter::FILTER_CATEGORIES.iter().map(|c| c.to_string()).collect())
     }
 
     async fn list_markets(&self, params: ListParams) -> Result<MarketPage, AdapterError> {
@@ -83,12 +86,20 @@ impl VenueAdapter for JupiterAdapter {
         client::get_market(&self.client, &self.base_url, &self.api_key, venue_market_id).await
     }
 
-    async fn raw_get(&self, path: &str, query: &[(String, String)]) -> Result<String, AdapterError> {
+    fn raw_path_prefixes(&self) -> &'static [&'static str] {
+        &["events", "markets", "orderbook"]
+    }
+
+    async fn raw_get(&self, path: &str, query: &[(String, String)]) -> Result<(u16, String), AdapterError> {
         client::raw_get(&self.client, &self.base_url, &self.api_key, path, query).await
     }
 
     async fn build_buy(&self, intent: &BuyIntent) -> Result<UnsignedTransaction, AdapterError> {
         execution::build_buy(&self.client, &self.base_url, &self.api_key, intent).await
+    }
+
+    async fn status(&self, venue_ref: &str) -> Result<ConfirmOutcome, AdapterError> {
+        execution::order_status(&self.client, &self.base_url, &self.api_key, venue_ref).await
     }
 
     async fn confirm(

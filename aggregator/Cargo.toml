@@ -28,6 +28,11 @@ futures = { workspace = true }
 prometheus = { workspace = true }
 once_cell = { workspace = true }
 sqlx = { workspace = true }
+regex = "1"
+zstd = "0.13"
+base64 = "0.22"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

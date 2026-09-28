@@ -19,4 +19,6 @@ pub struct AppState {
     pub execution_enabled: bool,
     /// Whether this deployment will build market-creation transactions. Off by default.
     pub market_creation_enabled: bool,
+    /// Per-client limiter for the public routes.
+    pub rate_limiter: Arc<crate::middleware::RateLimiter>,
 }

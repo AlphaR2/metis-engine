@@ -5,143 +5,127 @@
 //! writes through, and boot reads back, so a restart serves the previous catalog immediately
 //! instead of returning an empty list until the first refresh finishes.
 //!
+//! Each venue is stored as one zstd-compressed JSON snapshot (`market_snapshots`), not a row per
+//! market. Nothing reads individual markets from the database, and the catalog is mostly text
+//! repeated across markets (a Jupiter event's title and rules on every one of its markets), which
+//! only compresses well as a whole: ~67 MB of rows becomes a few MB, and on a remote database the
+//! load is bound by bytes on the wire.
+//!
 //! Queries are built with the runtime `sqlx::query` API rather than the `query!` macros on
 //! purpose: the macros need a reachable `DATABASE_URL` (or a committed `.sqlx` directory) at
 //! *compile* time, which would mean nobody can `cargo build` this crate without database access.
 
 use sqlx::{PgPool, Row};
 
-use crate::models::venue::{Category, VenueEvent, VenueMarket};
+use crate::models::venue::{Category, VenueMarket};
 
-/// Replaces everything stored for one (venue, category) bucket, in a single transaction.
+/// The format of `market_snapshots.payload`. A row with any other value is skipped at load.
+const ENCODING: &str = "json+zstd";
+
+/// zstd level. The snapshot is written every refresh, so this trades a little size for speed:
+/// the long tail of higher levels saves a few hundred KB and costs seconds of CPU.
+const ZSTD_LEVEL: i32 = 9;
+
+/// Replaces the stored snapshot for one venue.
 ///
-/// Delete-then-insert rather than upsert-and-reconcile: the refresh already computed the complete
-/// current contents of this bucket, and a market the venue has stopped listing must disappear
-/// rather than linger with a stale `last_synced_at`. Wrapping it in a transaction means a reader
-/// never observes the empty window between the delete and the insert.
-pub async fn replace_bucket(
+/// The whole catalog, not a merge: the refresh already computed the venue's complete current
+/// catalog, and a market (or a whole category) the venue has stopped listing must disappear.
+pub async fn replace_venue(
     pool: &PgPool,
     venue_id: &str,
-    category: &Category,
-    markets: &[VenueMarket],
+    by_category: &[(Category, Vec<VenueMarket>)],
 ) -> Result<(), sqlx::Error> {
-    let category_str = String::from(category.clone());
-    let mut tx = pool.begin().await?;
+    let market_count: usize = by_category.iter().map(|(_, markets)| markets.len()).sum();
+    let json = serde_json::to_vec(by_category).map_err(|err| sqlx::Error::Encode(err.into()))?;
+    // Compressing tens of MB is CPU work; keep it off the async workers.
+    let payload = tokio::task::spawn_blocking(move || compress(&json))
+        .await
+        .map_err(|err| sqlx::Error::Encode(err.into()))?
+        .map_err(|err| sqlx::Error::Encode(err.into()))?;
 
-    sqlx::query("DELETE FROM markets WHERE venue_id = $1 AND category = $2")
-        .bind(venue_id)
-        .bind(&category_str)
-        .execute(&mut *tx)
-        .await?;
-
-    // Multi-row inserts, not one statement per market. A single Jupiter category can hold 4000+
-    // markets, and a row-at-a-time loop makes that 4000+ sequential round-trips to a remote
-    // database - slow enough to outlast the refresh interval itself.
-    //
-    // Chunked because Postgres caps a statement at 65535 bind parameters; at 12 columns per row
-    // that allows ~5400, so 1000 leaves ample headroom.
-    const ROWS_PER_INSERT: usize = 1_000;
-
-    for chunk in markets.chunks(ROWS_PER_INSERT) {
-        let mut builder = sqlx::QueryBuilder::new(
-            "INSERT INTO markets (venue_id, venue_market_id, title, category, phase, start_time, \
-             close_time, resolution_time, yes_price, no_price, liquidity, dead, \
-             event_id, event_title, event_subtitle, event_image_url, rules) ",
-        );
-        builder.push_values(chunk, |mut row, market| {
-            row.push_bind(market.venue_id.clone())
-                .push_bind(market.venue_market_id.clone())
-                .push_bind(market.title.clone())
-                .push_bind(category_str.clone())
-                .push_bind(market.phase.clone())
-                .push_bind(market.start_time)
-                .push_bind(market.close_time)
-                .push_bind(market.resolution_time)
-                .push_bind(market.yes_price.clone())
-                .push_bind(market.no_price.clone())
-                .push_bind(market.liquidity.map(|l| l.to_string()))
-                .push_bind(market.dead)
-                .push_bind(market.event.as_ref().map(|e| e.event_id.clone()))
-                .push_bind(market.event.as_ref().map(|e| e.title.clone()))
-                .push_bind(market.event.as_ref().and_then(|e| e.subtitle.clone()))
-                .push_bind(market.event.as_ref().and_then(|e| e.image_url.clone()))
-                .push_bind(market.rules.clone());
-        });
-        // A market can move between categories between refreshes, in which case the DELETE above
-        // (scoped to the old category) won't have removed it - so the insert still needs to
-        // upsert rather than conflict.
-        builder.push(
-            " ON CONFLICT (venue_id, venue_market_id) DO UPDATE SET \
-             title = EXCLUDED.title, category = EXCLUDED.category, phase = EXCLUDED.phase, \
-             start_time = EXCLUDED.start_time, close_time = EXCLUDED.close_time, \
-             resolution_time = EXCLUDED.resolution_time, yes_price = EXCLUDED.yes_price, \
-             no_price = EXCLUDED.no_price, liquidity = EXCLUDED.liquidity, dead = EXCLUDED.dead, \
-             event_id = EXCLUDED.event_id, event_title = EXCLUDED.event_title, \
-             event_subtitle = EXCLUDED.event_subtitle, event_image_url = EXCLUDED.event_image_url, \
-             rules = EXCLUDED.rules, last_synced_at = now()",
-        );
-        builder.build().execute(&mut *tx).await?;
-    }
-
-    tx.commit().await
+    sqlx::query(
+        "INSERT INTO market_snapshots (venue_id, encoding, market_count, payload, written_at) \
+         VALUES ($1, $2, $3, $4, now()) \
+         ON CONFLICT (venue_id) DO UPDATE SET encoding = EXCLUDED.encoding, \
+         market_count = EXCLUDED.market_count, payload = EXCLUDED.payload, written_at = now()",
+    )
+    .bind(venue_id)
+    .bind(ENCODING)
+    .bind(i32::try_from(market_count).unwrap_or(i32::MAX))
+    .bind(payload)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
-/// Loads every persisted market, grouped into (venue, category) buckets ready to seed the
+/// Loads every stored snapshot, grouped into (venue, category) buckets ready to seed the
 /// in-memory store at boot.
 ///
 /// No time filtering here: `MarketStore::markets_in` applies the betting window at read time
 /// against the current clock, so persisting and loading stays a straight round-trip and the
 /// freshness decision lives in exactly one place.
+///
+/// A snapshot in an unknown encoding, or one the current model can't read, is logged and
+/// skipped: that venue starts empty and its next refresh rewrites it.
 pub async fn load_all(pool: &PgPool) -> Result<Vec<(String, Category, Vec<VenueMarket>)>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT venue_id, venue_market_id, title, category, phase, start_time, close_time, \
-         resolution_time, yes_price, no_price, liquidity, dead, event_id, event_title, \
-         event_subtitle, event_image_url, rules FROM markets",
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query("SELECT venue_id, encoding, payload FROM market_snapshots").fetch_all(pool).await?;
 
-    let mut buckets: std::collections::HashMap<(String, String), Vec<VenueMarket>> =
-        std::collections::HashMap::new();
-
+    let mut buckets = Vec::new();
     for row in rows {
         let venue_id: String = row.try_get("venue_id")?;
-        let category: String = row.try_get("category")?;
-        let liquidity: Option<String> = row.try_get("liquidity")?;
-        // An event row only means anything if it names a question; a stored id with no title
-        // would rebuild into an event that renders as a blank line.
-        let event_id: Option<String> = row.try_get("event_id")?;
-        let event_title: Option<String> = row.try_get("event_title")?;
-        let event = match (event_id, event_title) {
-            (Some(event_id), Some(title)) => Some(VenueEvent {
-                event_id,
-                title,
-                subtitle: row.try_get("event_subtitle")?,
-                image_url: row.try_get("event_image_url")?,
-            }),
-            _ => None,
-        };
+        let encoding: String = row.try_get("encoding")?;
+        if encoding != ENCODING {
+            tracing::warn!("{venue_id}: skipping stored snapshot in unknown encoding {encoding:?}");
+            continue;
+        }
+        let payload: Vec<u8> = row.try_get("payload")?;
+        // Decompressing and parsing tens of MB is CPU work; keep it off the async workers.
+        let decoded = tokio::task::spawn_blocking(move || decode(&payload))
+            .await
+            .map_err(|err| sqlx::Error::Decode(err.into()))?;
+        match decoded {
+            Ok(by_category) => {
+                buckets.extend(by_category.into_iter().map(|(category, markets)| (venue_id.clone(), category, markets)))
+            }
+            Err(err) => tracing::warn!("{venue_id}: skipping stored snapshot that doesn't decode: {err}"),
+        }
+    }
+    Ok(buckets)
+}
+
+fn compress(json: &[u8]) -> std::io::Result<Vec<u8>> {
+    zstd::encode_all(json, ZSTD_LEVEL)
+}
+
+fn decode(payload: &[u8]) -> std::io::Result<Vec<(Category, Vec<VenueMarket>)>> {
+    let json = zstd::decode_all(payload)?;
+    Ok(serde_json::from_slice(&json)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_round_trips() {
         let market = VenueMarket {
-            venue_id: venue_id.clone(),
-            venue_market_id: row.try_get("venue_market_id")?,
-            title: row.try_get("title")?,
-            event,
-            rules: row.try_get("rules")?,
-            category: Category::from(category.clone()),
-            phase: row.try_get("phase")?,
-            start_time: row.try_get("start_time")?,
-            close_time: row.try_get("close_time")?,
-            resolution_time: row.try_get("resolution_time")?,
-            yes_price: row.try_get("yes_price")?,
-            no_price: row.try_get("no_price")?,
-            liquidity: liquidity.and_then(|l| l.parse().ok()),
-            dead: row.try_get("dead")?,
+            venue_id: "jupiter".into(),
+            venue_market_id: "m1".into(),
+            title: "Will it rain?".into(),
+            category: Category::from("science".to_string()),
+            venue_category: "climate & science".into(),
+            rules: Some("Resolves YES if it rains.".into()),
+            ..Default::default()
         };
-        buckets.entry((venue_id, category)).or_default().push(market);
+        let by_category = vec![(market.category.clone(), vec![market.clone(), market])];
+
+        let decoded = decode(&compress(&serde_json::to_vec(&by_category).unwrap()).unwrap()).unwrap();
+
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), serde_json::to_value(&by_category).unwrap());
     }
 
-    Ok(buckets
-        .into_iter()
-        .map(|((venue, category), markets)| (venue, Category::from(category), markets))
-        .collect())
+    #[test]
+    fn garbage_payload_is_an_error_not_a_panic() {
+        assert!(decode(b"not zstd").is_err());
+    }
 }

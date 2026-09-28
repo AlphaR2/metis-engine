@@ -69,13 +69,18 @@ impl RoutingStrategy for BestOverall {
     }
 }
 
-/// Picks a strategy by its name string, defaulting to `BestOverall`.
-pub fn strategy_by_name(name: Option<&str>) -> Box<dyn RoutingStrategy> {
+/// Picks a strategy by its name string. Absent means `BestOverall`; an unrecognised name is an
+/// error, matching `/markets`' `sort`, so a typo surfaces as a 400 instead of silently ranking by
+/// something the caller didn't ask for.
+pub fn strategy_by_name(name: Option<&str>) -> Result<Box<dyn RoutingStrategy>, String> {
     match name {
-        Some("best_price") => Box::new(BestPrice),
-        Some("best_liquidity") => Box::new(BestLiquidity),
-        Some("best_execution") => Box::new(BestExecution),
-        _ => Box::new(BestOverall),
+        None | Some("") | Some("best_overall") => Ok(Box::new(BestOverall)),
+        Some("best_price") => Ok(Box::new(BestPrice)),
+        Some("best_liquidity") => Ok(Box::new(BestLiquidity)),
+        Some("best_execution") => Ok(Box::new(BestExecution)),
+        Some(other) => Err(format!(
+            "unknown strategy '{other}' - expected one of: best_overall, best_price, best_liquidity, best_execution"
+        )),
     }
 }
 
@@ -88,6 +93,7 @@ pub async fn find_best_market(
     strategy: &dyn RoutingStrategy,
     venue_lookup: impl Fn(&str) -> Option<std::sync::Arc<dyn VenueAdapter>>,
     health: &HealthRegistry,
+    cache: &crate::repositories::quote_cache::QuoteCache,
 ) -> Result<Recommendation, RoutingError> {
     if venue_refs.is_empty() {
         return Err(RoutingError::NoVenuesForOutcome("no venue markets provided".to_string()));
@@ -111,9 +117,9 @@ pub async fn find_best_market(
             // requested ("yes"/"no" for Panta/Jupiter, "long"/"short" for Pascal) - never a single
             // side string reused across venues, since the same canonical outcome maps to different
             // native terms per venue.
-            match adapter.quote(&venue_ref.venue_market_id, venue_ref.venue_side.as_str(), requested_size).await {
+            let side = venue_ref.venue_side.as_str();
+            match crate::services::quoting::quote(&adapter, &venue_ref.venue_market_id, side, requested_size, health, cache).await {
                 Ok(quote) => {
-                    health.record_success(venue_id);
                     Some(RoutingCandidate {
                         venue_id,
                         venue_market_id: venue_ref.venue_market_id.clone(),
@@ -126,15 +132,8 @@ pub async fn find_best_market(
                         routable: health.is_routable(venue_id),
                     })
                 }
-                Err(err) => {
-                    // A market with no depth is the venue answering correctly, not failing -
-                    // counting it would take a healthy venue out of routing after a few thin
-                    // markets.
-                    if !err.is_business_outcome() {
-                        health.record_failure(venue_id, err.to_string());
-                    }
-                    None
-                }
+                // Health is recorded inside `quoting::quote`, by what the error means.
+                Err(_) => None,
             }
         }
     }))

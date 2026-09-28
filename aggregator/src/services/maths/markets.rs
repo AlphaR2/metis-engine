@@ -90,7 +90,7 @@ mod tests {
             title: format!("Market {id}"),
             event: None,
             rules: None,
-            category: Category::Sports,
+            category: Category::from("sports"),
             phase: "open".to_string(),
             start_time: NOW,
             close_time,
@@ -99,6 +99,7 @@ mod tests {
             no_price: Some("0.5".to_string()),
             liquidity: liquidity.map(|l| l.parse().unwrap()),
             dead: false,
+            ..Default::default()
         }
     }
 

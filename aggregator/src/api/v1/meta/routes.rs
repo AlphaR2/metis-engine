@@ -33,11 +33,18 @@ pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRe
     }
 }
 
-/// Prometheus text-exposition metrics. Unauthenticated for now - see `crate::metrics` module doc.
+/// Prometheus text-exposition metrics, behind the admin token.
 #[utoipa::path(get, path = "/metrics", tag = "meta", responses((status = 200, body = String, content_type = "text/plain")))]
 pub async fn metrics_route(State(state): State<AppState>) -> String {
     if let Some(pool) = &state.db {
-        crate::metrics::DB_POOL_IN_USE.set(pool.size() as i64);
+        // `size()` is connections open, not in use; idle ones are the difference.
+        crate::metrics::DB_POOL_IN_USE.set(pool.size() as i64 - pool.num_idle() as i64);
+    }
+    let now = crate::utils::time::now_unix();
+    for bucket in state.aggregator.markets.read().await.bucket_statuses() {
+        let labels = [bucket.venue_id.as_str(), bucket.category.as_str()];
+        crate::metrics::BUCKET_AGE.with_label_values(&labels).set(now - bucket.refreshed_at);
+        crate::metrics::BUCKET_STALE.with_label_values(&labels).set(i64::from(bucket.stale));
     }
     crate::metrics::render()
 }

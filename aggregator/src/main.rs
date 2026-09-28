@@ -10,6 +10,7 @@ mod aggregator;
 mod api;
 mod app;
 mod config;
+mod engine;
 mod database;
 mod errors;
 mod middleware;
@@ -19,7 +20,11 @@ mod openapi;
 mod repositories;
 mod services;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod utils;
+#[cfg(test)]
+mod venue_contract;
 
 use std::env;
 use std::path::PathBuf;

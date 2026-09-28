@@ -212,7 +212,7 @@ pub async fn order_status(
     order_pubkey: &str,
 ) -> Result<ConfirmOutcome, AdapterError> {
     let response = client
-        .get(format!("{base_url}/orders/status/{order_pubkey}"))
+        .get(crate::utils::http::venue_url(base_url, &["orders", "status", order_pubkey])?)
         .header("x-api-key", api_key)
         .send()
         .await?;

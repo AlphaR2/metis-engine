@@ -4,6 +4,5 @@
 
 pub mod event;
 pub mod execution;
-pub mod position;
 pub mod routing;
 pub mod venue;

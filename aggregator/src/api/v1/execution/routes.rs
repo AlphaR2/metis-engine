@@ -48,12 +48,7 @@ fn adapter(
     state: &AppState,
     venue_id: &str,
 ) -> Result<std::sync::Arc<dyn crate::services::VenueAdapter>, ApiError> {
-    state
-        .aggregator
-        .venues
-        .iter()
-        .find(|v| v.id() == venue_id)
-        .cloned()
+    state.aggregator.venue(venue_id)
         .ok_or_else(|| {
             ApiError::BadRequest(format!(
                 "no venue '{venue_id}' is enabled — check ENABLED_VENUES"
@@ -164,6 +159,11 @@ pub async fn confirm(
     State(state): State<AppState>,
     Json(req): Json<ConfirmRequest>,
 ) -> Result<Json<ConfirmOutcome>, ApiError> {
+    if req.signature.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "signature is required - to check an action's status without one, GET /execution/{venue_id}/{venue_ref}".to_string(),
+        ));
+    }
     let venue = adapter(&state, &req.venue_id)?;
     let outcome = venue.confirm(&req.venue_ref, &req.signature).await?;
     Ok(Json(outcome))
@@ -226,15 +226,18 @@ pub async fn abilities(State(state): State<AppState>) -> Json<AbilitiesResponse>
         ("venue_id" = String, Path, description = "Venue the action was built on"),
         ("venue_ref" = String, Path, description = "The venue_ref from the build response"),
     ),
-    responses((status = 200, body = ConfirmOutcome, description = "Current status of a submitted action."))
+    responses(
+        (status = 200, body = ConfirmOutcome, description = "Current status of a submitted action."),
+        (status = 400, description = "Unknown venue, or a venue with no read-only status lookup"),
+    )
 )]
-/// Polls a submitted action's status without re-sending a signature.
+/// Polls a submitted action's status. Read-only - never registers or re-sends anything, so a
+/// venue without a status lookup (Panta today) says so instead of reporting a false failure.
 pub async fn status(
     State(state): State<AppState>,
     Path((venue_id, venue_ref)): Path<(String, String)>,
 ) -> Result<Json<ConfirmOutcome>, ApiError> {
     let venue = adapter(&state, &venue_id)?;
-    // An empty signature means "tell me where this stands", not "here is a new broadcast".
-    let outcome = venue.confirm(&venue_ref, "").await?;
+    let outcome = venue.status(&venue_ref).await?;
     Ok(Json(outcome))
 }

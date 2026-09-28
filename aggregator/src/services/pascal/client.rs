@@ -48,6 +48,7 @@ fn market_to_venue_market(market: PascalMarket) -> VenueMarket {
         // Pascal's real tradeability signal is unconfirmed against docs this session - default to
         // not-dead rather than silently hiding every Pascal market until that's verified.
         dead: false,
+        ..Default::default()
     }
 }
 

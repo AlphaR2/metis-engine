@@ -37,9 +37,20 @@ fn routable_first_then<F: Fn(&RoutingCandidate) -> Decimal>(
     scored
 }
 
-/// Ranks purely by lowest price - lower is better for a buyer, so score is negated price.
+/// What one contract really costs: the average fill price plus the venue's fee spread across the
+/// contracts filled. Every price-based score ranks on this, never the bare price, so a venue that
+/// is cheaper only before fees can't win (audit A11). A zero fill carries no per-contract fee.
+pub fn all_in_price(c: &RoutingCandidate) -> Decimal {
+    if c.executable_size > Decimal::ZERO {
+        c.price + c.fee_usdc / c.executable_size
+    } else {
+        c.price
+    }
+}
+
+/// Ranks purely by lowest all-in price - lower is better for a buyer, so score is negated.
 pub fn score_best_price(candidates: &[RoutingCandidate]) -> Vec<ScoredCandidate> {
-    routable_first_then(candidates, |c| -c.price)
+    routable_first_then(candidates, |c| -all_in_price(c))
 }
 
 /// Ranks by how much size a venue can actually fill.
@@ -51,7 +62,7 @@ pub fn score_best_liquidity(candidates: &[RoutingCandidate]) -> Vec<ScoredCandid
 /// that can.
 pub fn score_best_execution(candidates: &[RoutingCandidate]) -> Vec<ScoredCandidate> {
     routable_first_then(candidates, |c| {
-        if c.fully_executable { -c.price } else { -Decimal::from(1_000) - c.price }
+        if c.fully_executable { -all_in_price(c) } else { -Decimal::from(1_000) - all_in_price(c) }
     })
 }
 
@@ -60,7 +71,7 @@ pub fn score_best_execution(candidates: &[RoutingCandidate]) -> Vec<ScoredCandid
 /// different weighting.
 pub fn score_best_overall(candidates: &[RoutingCandidate]) -> Vec<ScoredCandidate> {
     routable_first_then(candidates, |c| {
-        let price_component = -c.price * Decimal::from(10);
+        let price_component = -all_in_price(c) * Decimal::from(10);
         // ln(1 + executable_size), computed manually since Decimal has no ln_1p - checked_ln
         // avoids a panic on a pathological non-positive executable_size.
         let liquidity_component = (Decimal::ONE + c.executable_size)
@@ -108,6 +119,24 @@ mod tests {
             vec![candidate("cheap_but_down", "0.01", "100", false), candidate("normal", "0.5", "100", true)];
         let ranked = score_best_price(&candidates);
         assert_eq!(ranked[0].candidate.venue_id, "normal");
+    }
+
+    #[test]
+    fn fees_can_flip_the_price_ranking() {
+        // "cheap" is 0.50 per contract but charges 5 USDC on 100 contracts: 0.55 all-in.
+        let mut cheap = candidate("cheap", "0.50", "100", true);
+        cheap.fee_usdc = Decimal::from(5);
+        let honest = candidate("honest", "0.52", "100", true);
+        for ranked in [score_best_price(&[cheap.clone(), honest.clone()]), score_best_overall(&[cheap, honest])] {
+            assert_eq!(ranked[0].candidate.venue_id, "honest");
+        }
+    }
+
+    #[test]
+    fn all_in_price_ignores_fees_on_an_empty_fill() {
+        let mut c = candidate("a", "0.5", "0", true);
+        c.fee_usdc = Decimal::ONE;
+        assert_eq!(all_in_price(&c), "0.5".parse().unwrap());
     }
 
     #[test]

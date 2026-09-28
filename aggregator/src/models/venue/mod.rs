@@ -11,116 +11,92 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-/// A market's category, normalized across venues into a closed set so a UI can filter/group by
-/// it. The two integrated venues do *not* share a vocabulary - confirmed live against both:
+/// A category name, normalised for comparison: trimmed and lowercased. **Not a closed set** -
+/// categories come from the venues (each venue's own list plus whatever its markets report), so a
+/// category a venue adds tomorrow shows up without a code change.
 ///
-/// - Jupiter accepts `all|crypto|sports|politics|esports|culture|economics|tech|finance|
-///   climate & science|weather|mentions` and 400s on anything else.
-/// - Panta accepts `sports|crypto|politics|entertainment|finance|science|world|other`.
-///
-/// Only sports/crypto/politics/finance exist on both. This enum is the canonical superset a
-/// caller filters by; each venue's own model module owns translating it into that venue's native
-/// string (and saying "not supported here"), so a category one venue has never blocks the other.
-///
-/// `Other` preserves whatever raw string a venue sent that we don't recognize yet, rather than
-/// dropping it - round-trips losslessly via `From<String>`/`Into<String>` (see the
-/// `#[serde(from/into)]` below), so it still shows up correctly in JSON even if it's not one of
-/// the named variants.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+/// Two spellings of one idea across venues (Jupiter `climate & science`, Panta `science`) are
+/// reconciled by `CategoryAliases`, which is data, not code. What the venue actually sent is kept
+/// verbatim on `VenueMarket::venue_category`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, ToSchema)]
 #[serde(from = "String", into = "String")]
-pub enum Category {
-    Crypto,
-    Sports,
-    Politics,
-    Economics,
-    Entertainment,
-    Technology,
-    Esports,
-    Culture,
-    Finance,
-    /// Panta's `science`, Jupiter's `climate & science`.
-    Science,
-    World,
-    Weather,
-    /// Panta's catch-all bucket. A real, selectable category on that venue - distinct from
-    /// `Unknown` below, which means we failed to recognise something.
-    ///
-    /// These were the same variant once, and the collision was a live bug: `"other"` fell into the
-    /// catch-all, the catch-all mapped to "no equivalent", and Panta's `other` category became
-    /// impossible to create in or browse.
-    Other,
-    /// Any venue-reported category string outside the known set above. Always stored lowercased
-    /// so two venues spelling the same unknown category differently ("World" vs "world") compare
-    /// equal - with `category` a *required* API filter, a case mismatch here is a silent miss,
-    /// not a cosmetic wrinkle.
-    Unknown(String),
+pub struct Category(String);
+
+impl Category {
+    pub fn new(raw: &str) -> Self {
+        Self(raw.trim().to_lowercase())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl From<String> for Category {
     fn from(raw: String) -> Self {
-        let lowered = raw.to_lowercase();
-        match lowered.trim() {
-            "crypto" => Category::Crypto,
-            "sports" => Category::Sports,
-            "politics" => Category::Politics,
-            "economics" => Category::Economics,
-            "entertainment" => Category::Entertainment,
-            "technology" | "tech" => Category::Technology,
-            "esports" => Category::Esports,
-            "culture" => Category::Culture,
-            "finance" => Category::Finance,
-            "science" | "climate & science" => Category::Science,
-            "world" => Category::World,
-            "weather" => Category::Weather,
-            "other" => Category::Other,
-            unrecognised => Category::Unknown(unrecognised.to_string()),
-        }
+        Self::new(&raw)
     }
 }
 
-impl Category {
-    /// Every category a caller may filter by, for `GET /categories` and OpenAPI docs.
-    ///
-    /// `Other` is included because it is a genuine, selectable bucket on Panta. `Unknown` is not:
-    /// it exists to preserve venue output we failed to recognise, which is not something to offer
-    /// as a choice.
-    pub fn all() -> Vec<Category> {
-        vec![
-            Category::Sports,
-            Category::Crypto,
-            Category::Politics,
-            Category::Economics,
-            Category::Finance,
-            Category::Technology,
-            Category::Esports,
-            Category::Culture,
-            Category::Entertainment,
-            Category::Science,
-            Category::World,
-            Category::Weather,
-            Category::Other,
-        ]
+impl From<&str> for Category {
+    fn from(raw: &str) -> Self {
+        Self::new(raw)
     }
 }
 
 impl From<Category> for String {
     fn from(category: Category) -> Self {
-        match category {
-            Category::Crypto => "crypto".to_string(),
-            Category::Sports => "sports".to_string(),
-            Category::Politics => "politics".to_string(),
-            Category::Economics => "economics".to_string(),
-            Category::Entertainment => "entertainment".to_string(),
-            Category::Technology => "technology".to_string(),
-            Category::Esports => "esports".to_string(),
-            Category::Culture => "culture".to_string(),
-            Category::Finance => "finance".to_string(),
-            Category::Science => "science".to_string(),
-            Category::World => "world".to_string(),
-            Category::Weather => "weather".to_string(),
-            Category::Other => "other".to_string(),
-            Category::Unknown(raw) => raw,
+        category.0
+    }
+}
+
+impl std::fmt::Display for Category {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Maps a venue's category name onto the shared name used across venues, where the two differ
+/// only in wording. Anything without an alias is its own shared name, so an unaliased category is
+/// still served - it is just not merged with another venue's.
+#[derive(Debug, Clone, Default)]
+pub struct CategoryAliases {
+    aliases: std::collections::HashMap<Category, Category>,
+}
+
+impl CategoryAliases {
+    /// The aliases known to be needed today, from the Phase 0 field inventory
+    /// (`docs/venue-fields.md`). Extend with `CATEGORY_ALIASES` rather than code.
+    pub fn defaults() -> Self {
+        Self::from_pairs([("climate & science", "science"), ("tech", "technology"), ("pop-culture", "culture")])
+    }
+
+    pub fn from_pairs<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        let aliases = pairs.into_iter().map(|(from, to)| (Category::new(from), Category::new(to))).collect();
+        Self { aliases }
+    }
+
+    /// Parses `from=to,from=to` (e.g. from the `CATEGORY_ALIASES` env var) on top of `defaults()`.
+    pub fn with_overrides(mut self, spec: &str) -> Self {
+        for pair in spec.split(',') {
+            if let Some((from, to)) = pair.split_once('=')
+                && !from.trim().is_empty()
+                && !to.trim().is_empty()
+            {
+                self.aliases.insert(Category::new(from), Category::new(to));
+            }
         }
+        self
+    }
+
+    /// The shared name for `native`.
+    pub fn canonical(&self, native: &str) -> Category {
+        let category = Category::new(native);
+        self.aliases.get(&category).cloned().unwrap_or(category)
     }
 }
 
@@ -163,15 +139,16 @@ pub struct VenueCapabilities {
     /// false for a bonding-curve venue like Panta (one quote endpoint gives you a direct fill
     /// estimate); true for an order-book venue like Pascal (a quote means walking the book).
     pub has_order_book: bool,
-    /// true if the venue honours a server-side `category` filter on `list_markets`. Both
-    /// integrated venues do - on different vocabularies, which `VenueAdapter::native_category`
-    /// translates. False means the refresh fetches the whole catalog once and buckets by each
-    /// market's own reported category.
+    /// true if the venue honours a server-side `category` filter on `list_markets`, with the
+    /// names `VenueAdapter::filter_categories` returns. False means the refresh fetches the whole
+    /// catalog in one unfiltered sweep.
     pub supports_category_filter: bool,
-    /// false if the venue's cursor pagination does not actually advance. Panta's `nextCursor` is
-    /// a constant: following it re-serves page 1 indefinitely (six requests returned 300 rows
-    /// holding 50 distinct markets). The refresh detects an unchanged cursor generically, but
-    /// recording it here keeps the behaviour visible rather than buried as a surprise.
+    /// false if the venue's cursor pagination does not actually advance - the symptom is
+    /// `nextCursor` coming back constant, so following it re-serves page 1 indefinitely (this is
+    /// exactly what Panta did until it was fixed venue-side on 2026-09-28; verified live in
+    /// `scripts/check-panta.sh`). The refresh detects an unchanged cursor generically regardless
+    /// of this flag, but recording it here keeps the behaviour visible rather than buried as a
+    /// surprise.
     pub cursor_pagination_advances: bool,
     /// true if this venue can build a buy transaction for us to hand to a wallet. A UI asks this
     /// rather than assuming, so a venue we can only read stays visibly read-only.
@@ -193,7 +170,7 @@ pub struct VenueCapabilities {
 ///
 /// `None` for a venue with no native event layer - Panta puts the full question on the market
 /// itself, so there is nothing to nest.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct VenueEvent {
     /// The venue's own id for the event.
     pub event_id: String,
@@ -202,6 +179,50 @@ pub struct VenueEvent {
     /// Extra qualifying text the venue shows beneath the title, when it has any.
     pub subtitle: Option<String>,
     /// Event artwork, for a UI that wants it.
+    pub image_url: Option<String>,
+    /// The venue's URL slug for the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    /// Longer description, when the venue has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The venue's own tags, verbatim (Jupiter: `elections`, `middle-east`, …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// The venue's subcategory, verbatim - league or asset class (Jupiter: `mlb`, `cs2`, `btc`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subcategory: Option<String>,
+    /// League or competition name, when the venue names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub league: Option<String>,
+    /// When the real-world event starts (kickoff), as distinct from when its markets opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<i64>,
+    /// Total traded volume across the event, in USDC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub volume_usdc: Option<Decimal>,
+    /// Traded volume in the last 24 hours, in USDC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub volume_24h_usdc: Option<Decimal>,
+    /// The venue's plain-language close condition, e.g. "closes after a winner is declared".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_condition: Option<String>,
+    /// Every other field the venue sent for the event, untouched, so nothing is lost between the
+    /// wire and our store even before we model it.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    #[schema(value_type = Object)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A team, player or other named participant a venue attaches to a market.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct VenueEntity {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abbreviation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
 }
 
@@ -216,7 +237,7 @@ pub struct VenueEvent {
 ///
 /// Close and resolution are not the same moment: on a 50-market Panta sample they differed on 38
 /// of them, by anything from hours to five days. Betting windows key off `close_time`.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct VenueMarket {
     /// Which venue this market came from, e.g. "panta". Set by the adapter that produced it - a
     /// market served over the API is meaningless without knowing where it can be traded.
@@ -230,9 +251,36 @@ pub struct VenueMarket {
     /// that publishes the whole question per market (Panta) this is that question and `event` is
     /// `None`. A UI should lead with `event.title` where there is one and fall back to this.
     pub title: String,
-    /// The venue's own parent event, when it has one. See `VenueEvent`.
+    /// The market's title readable on its own: `"{event title} — {title}"` when `title` is only an
+    /// outcome label under a parent event, otherwise `title`. Set at ingestion; a UI can lead with
+    /// it and never show a bare "Up" or "160-179".
+    #[serde(default)]
+    pub display_title: String,
+    /// The venue's parent event. Venues without an event layer (Panta) get one event per market,
+    /// so every market has an event to hang metadata on.
     #[serde(default)]
     pub event: Option<VenueEvent>,
+    /// The venue's category for this market exactly as sent. `category` is the shared name after
+    /// aliasing (see `CategoryAliases`).
+    #[serde(default)]
+    pub venue_category: String,
+    /// The outcome labels the venue lists for this market, e.g. `["Falcons", "Packers"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outcome_labels: Vec<String>,
+    /// The participant this market is about, when the venue says (Jupiter's `team`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<VenueEntity>,
+    /// The venue's own market kind, verbatim (Jupiter `sportsMarketType`: `moneyline`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub market_kind: Option<String>,
+    /// Where the venue itself sources the market from, when it aggregates (Jupiter: `polymarket`,
+    /// `kalshi`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Every other field the venue sent for the market, untouched.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    #[schema(value_type = Object)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
     /// The venue's resolution terms in full - what counts as a win, and from which source.
     /// Surfaced on the market detail page, where it is the most important text on the screen.
     #[serde(default)]
@@ -263,6 +311,11 @@ pub struct VenueMarket {
     /// rather than silently hiding every market they have.
     #[serde(default)]
     pub dead: bool,
+    /// Open, but not tradable through the venue's API - shown with its prices, never routed to.
+    /// Panta after its primary phase: the market keeps trading on Panta's on-chain order book,
+    /// which its API does not reach.
+    #[serde(default)]
+    pub display_only: bool,
 }
 
 impl VenueMarket {
@@ -275,10 +328,29 @@ impl VenueMarket {
     /// keep showing it. A `close_time`/`resolution_time` of 0 means "unknown" (a garbled or
     /// missing timestamp) and is given the benefit of the doubt rather than dropped.
     pub fn is_bettable(&self, now: i64) -> bool {
+        self.is_open(now) && !self.title.trim().is_empty()
+    }
+
+    /// `is_bettable` without the text check: the venue still takes bets on it, whether or not we
+    /// have words to show yet. Lets an adapter decide which markets are worth fetching text for.
+    pub fn is_open(&self, now: i64) -> bool {
         !self.dead
             && (self.close_time == 0 || self.close_time > now)
             && (self.resolution_time == 0 || self.resolution_time > now)
-            && !self.title.trim().is_empty()
+    }
+
+    /// See `display_title`. Computed from the venue fields so ingestion can set it once.
+    pub fn compose_display_title(&self) -> String {
+        let title = self.title.trim();
+        let Some(event) = self.event.as_ref().filter(|e| !e.title.trim().is_empty()) else {
+            return title.to_string();
+        };
+        let event_title = event.title.trim();
+        if title.is_empty() || title.eq_ignore_ascii_case(event_title) {
+            event_title.to_string()
+        } else {
+            format!("{event_title} — {title}")
+        }
     }
 
     /// The price for one side, as the venue quoted it in its catalog listing.
@@ -293,7 +365,9 @@ impl VenueMarket {
 /// Optional filters passed to `list_markets` - a venue may ignore any of these.
 #[derive(Debug, Clone, Default)]
 pub struct ListParams {
-    pub category: Option<Category>,
+    /// The venue's own category name, verbatim - one of the names its `filter_categories`
+    /// returned. `None` lists every category.
+    pub category: Option<String>,
     pub cursor: Option<String>,
     /// Venue-native sort field, e.g. Jupiter's `"beginAt"` - ignored by a venue that doesn't
     /// support server-side sorting.
@@ -347,7 +421,7 @@ mod tests {
             title: "Something vs Something".to_string(),
             event: None,
             rules: None,
-            category: Category::Sports,
+            category: Category::from("sports"),
             phase: "primary".to_string(),
             start_time: 0,
             close_time,
@@ -356,6 +430,7 @@ mod tests {
             no_price: Some("0.5".to_string()),
             liquidity: None,
             dead: false,
+            ..Default::default()
         }
     }
 
@@ -385,52 +460,30 @@ mod tests {
     }
 
     #[test]
-    fn category_parsing_is_case_insensitive_for_unknown_values_too() {
-        // Two venues spelling the same unknown category differently must compare equal, or a
-        // required `category` filter silently misses.
-        assert_eq!(Category::from("World".to_string()), Category::World);
-        assert_eq!(Category::from("MysteryCat".to_string()), Category::from("mysterycat".to_string()));
+    fn categories_compare_case_and_space_insensitively() {
+        // Two venues spelling the same category differently must compare equal, or a required
+        // `category` filter silently misses.
+        assert_eq!(Category::from(" World "), Category::from("world"));
     }
 
     #[test]
-    fn other_is_a_real_category_not_the_catch_all() {
-        // Panta has a genuine bucket called "other". It shared a variant with the unrecognised
-        // catch-all once, which made it impossible to create in or browse - the catch-all maps to
-        // "this venue has no equivalent".
-        assert_eq!(Category::from("other".to_string()), Category::Other);
-        assert_ne!(Category::from("other".to_string()), Category::Unknown("other".to_string()));
+    fn any_venue_category_is_accepted_not_just_a_known_list() {
+        assert_eq!(Category::from("Quidditch").as_str(), "quidditch");
     }
 
     #[test]
-    fn an_unrecognised_category_is_unknown_not_other() {
-        assert_eq!(
-            Category::from("quidditch".to_string()),
-            Category::Unknown("quidditch".to_string())
-        );
+    fn aliases_merge_differently_worded_categories_and_leave_the_rest_alone() {
+        let aliases = CategoryAliases::defaults();
+        assert_eq!(aliases.canonical("Climate & Science"), Category::from("science"));
+        assert_eq!(aliases.canonical("science"), Category::from("science"));
+        assert_eq!(aliases.canonical("mentions"), Category::from("mentions"));
     }
 
     #[test]
-    fn other_is_offered_as_a_filterable_category() {
-        // If it isn't in all(), it never reaches GET /categories and nobody can browse it.
-        assert!(Category::all().contains(&Category::Other));
-    }
-
-    #[test]
-    fn the_catch_all_is_never_offered_as_a_choice() {
-        assert!(!Category::all().iter().any(|c| matches!(c, Category::Unknown(_))));
-    }
-
-    #[test]
-    fn jupiters_climate_and_science_maps_onto_science() {
-        assert_eq!(Category::from("climate & science".to_string()), Category::Science);
-    }
-
-    #[test]
-    fn category_round_trips_through_string() {
-        for category in Category::all() {
-            let raw: String = category.clone().into();
-            assert_eq!(Category::from(raw), category);
-        }
+    fn alias_overrides_extend_the_defaults() {
+        let aliases = CategoryAliases::defaults().with_overrides("stocks=finance, bad-entry ,=x");
+        assert_eq!(aliases.canonical("stocks"), Category::from("finance"));
+        assert_eq!(aliases.canonical("climate & science"), Category::from("science"));
     }
 
     #[test]

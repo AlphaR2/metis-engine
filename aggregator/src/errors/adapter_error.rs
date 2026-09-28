@@ -79,6 +79,26 @@ impl AdapterError {
         }
     }
 
+    /// True when the venue refused the request itself as malformed or unacceptable (a 4xx other
+    /// than auth, not-found and rate-limit) - e.g. a category filter it doesn't accept. Retrying
+    /// can't help, and it is not evidence the venue is down.
+    pub fn is_client_rejection(&self) -> bool {
+        let rejected = |code: u16| (400..500).contains(&code) && !matches!(code, 401 | 403 | 404 | 429);
+        match self {
+            AdapterError::Http(err) => err.status().is_some_and(|s| rejected(s.as_u16())),
+            // `error_for_status` errors are carried as text: "HTTP status client error (400 Bad
+            // Request) for url (...)".
+            AdapterError::Venue(msg) => msg
+                .split("client error (")
+                .nth(1)
+                .and_then(|rest| rest.get(..3))
+                .and_then(|code| code.parse().ok())
+                .is_some_and(rejected),
+            AdapterError::InvalidRequest(_) => true,
+            _ => false,
+        }
+    }
+
     pub fn is_business_outcome(&self) -> bool {
         matches!(
             self,

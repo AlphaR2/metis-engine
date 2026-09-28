@@ -9,6 +9,8 @@ pub mod markets;
 pub mod maths;
 pub mod panta;
 pub mod pascal;
+pub mod quoting;
+pub mod registry;
 pub mod routing;
 
 use async_trait::async_trait;
@@ -18,7 +20,7 @@ use crate::errors::AdapterError;
 use crate::models::execution::{
     BuyIntent, ClaimIntent, ConfirmOutcome, CreateMarketIntent, UnsignedTransaction,
 };
-use crate::models::venue::{Category, ListParams, MarketPage, VenueCapabilities, VenueMarket, VenueQuote};
+use crate::models::venue::{ListParams, MarketPage, VenueCapabilities, VenueMarket, VenueQuote};
 
 /// The one interface every venue integration implements - Panta, Jupiter, Pascal.
 #[async_trait]
@@ -40,18 +42,15 @@ pub trait VenueAdapter: Send + Sync {
         side: &str,
         amount_usdc: Decimal,
     ) -> Result<VenueQuote, AdapterError>;
-    /// Translates a canonical `Category` into this venue's own native filter string, or `None`
-    /// if this venue has no equivalent for it.
+    /// The venue's own category names that its list filter accepts, verbatim - read from the
+    /// venue where it publishes them (Panta's `/categories/`). The refresh runs one chain per name
+    /// plus one unfiltered sweep, and passes each name back unchanged in `ListParams::category`.
     ///
-    /// The two integrated venues accept genuinely different vocabularies (Jupiter 400s on
-    /// anything outside its own list; Panta has buckets Jupiter lacks and vice versa), so this
-    /// cannot be one shared list. Returning `None` means "skip this category for this venue",
-    /// which is why a caller asking for `esports` gets Jupiter markets and no Panta error.
-    ///
-    /// The default returns `None` for everything, meaning "no server-side category filter" - the
-    /// refresh then fetches once and buckets by each market's own reported category.
-    fn native_category(&self, _category: &Category) -> Option<String> {
-        None
+    /// Markets are always bucketed by the category they report themselves, so this only decides
+    /// how the catalog is fetched, never how it is labelled. The default (empty) means no
+    /// server-side category filter: the unfiltered sweep is the whole catalog.
+    async fn filter_categories(&self) -> Result<Vec<String>, AdapterError> {
+        Ok(Vec::new())
     }
 
     /// Fetches a raw GET from this venue's API and returns the body **exactly as sent** - no
@@ -63,9 +62,17 @@ pub trait VenueAdapter: Send + Sync {
     /// data looks wrong, this is what distinguishes *their* bug from *ours*.
     ///
     /// GET only, deliberately: it borrows the venue credentials, and a general relay that could
-    /// also POST would be a way to place orders through someone else's key.
-    async fn raw_get(&self, _path: &str, _query: &[(String, String)]) -> Result<String, AdapterError> {
+    /// also POST would be a way to place orders through someone else's key. Returns the upstream
+    /// status code alongside the body so a venue error is not dressed up as a 200.
+    async fn raw_get(&self, _path: &str, _query: &[(String, String)]) -> Result<(u16, String), AdapterError> {
         Err(AdapterError::Unsupported { venue: self.id(), action: "raw inspection" })
+    }
+
+    /// First path segments `raw_get` may reach on this venue - read-only catalog endpoints only.
+    /// Anything else on the venue's host (order routes, account data, other products sharing the
+    /// same API key) stays out of reach even for an operator. Empty means no raw inspection.
+    fn raw_path_prefixes(&self) -> &'static [&'static str] {
+        &[]
     }
 
     // ── Actions that need a signature ───────────────────────────────────────────────────────
@@ -95,6 +102,13 @@ pub trait VenueAdapter: Send + Sync {
     /// Builds a claim for winnings or accrued creator fees.
     async fn build_claim(&self, _intent: &ClaimIntent) -> Result<UnsignedTransaction, AdapterError> {
         Err(AdapterError::Unsupported { venue: self.id(), action: "claims" })
+    }
+
+    /// Reports where a previously built action stands. Read-only: it must never tell the venue
+    /// anything, so polling it as often as a caller likes is always safe. A venue with no
+    /// read-only status lookup says `Unsupported` rather than guessing (audit A8).
+    async fn status(&self, _venue_ref: &str) -> Result<ConfirmOutcome, AdapterError> {
+        Err(AdapterError::Unsupported { venue: self.id(), action: "status lookup" })
     }
 
     /// Tells the venue a built transaction was broadcast, and asks what became of it.

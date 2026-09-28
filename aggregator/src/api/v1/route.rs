@@ -5,19 +5,26 @@ use axum::routing::{get, post};
 
 use crate::state::AppState;
 
-use super::{discovery, execution, markets, meta, positions, raw, routing};
+use super::{catalog, discovery, execution, markets, meta, raw, routing};
 
 /// Builds the full set of routes this service serves, unmounted (no state, no layers yet -
 /// `app::run` attaches those).
 pub fn configure() -> Router<AppState> {
     Router::new()
+        .route("/v1/events", get(catalog::routes::list_events))
+        .route("/v1/events/{id}", get(catalog::routes::get_event))
+        .route("/v1/events/{id}/questions/{question_id}", get(catalog::routes::get_question))
+        .route("/v1/markets", get(catalog::routes::list_markets))
+        .route("/v1/markets/{venue_id}/{venue_market_id}", get(catalog::routes::get_market))
+        .route("/v1/categories", get(catalog::routes::list_categories))
+        .route("/v1/venues", get(catalog::routes::list_venues))
+        .route("/v1/route", post(catalog::routes::route))
         .route("/health", get(meta::routes::health))
         .route("/markets", get(markets::routes::list_markets))
         .route("/categories", get(markets::routes::list_categories))
         .route("/events", get(discovery::routes::list_events))
         .route("/events/{id}/markets", get(discovery::routes::get_event_markets))
         .route("/venues/health", get(discovery::routes::venue_health))
-        .route("/venues/{venue_id}/raw/{*path}", get(raw::routes::raw_get))
         .route("/find-best-market", post(routing::routes::find_best_market_route))
         .route("/execution/abilities", get(execution::routes::abilities))
         .route("/execution/orders", post(execution::routes::build_order))
@@ -25,10 +32,6 @@ pub fn configure() -> Router<AppState> {
         .route("/execution/claims", post(execution::routes::build_claim))
         .route("/execution/confirm", post(execution::routes::confirm))
         .route("/execution/{venue_id}/{venue_ref}", get(execution::routes::status))
-        .route(
-            "/positions",
-            post(positions::routes::record_position).get(positions::routes::list_positions),
-        )
 }
 
 /// Operator-only routes, mounted behind the admin-token gate by `app::run`. Kept separate from
@@ -37,4 +40,8 @@ pub fn configure_admin() -> Router<AppState> {
     Router::new()
         .route("/metrics", get(meta::routes::metrics_route))
         .route("/refresh", post(meta::routes::refresh))
+        .route("/venues/{venue_id}/raw/{*path}", get(raw::routes::raw_get))
+        .route("/admin/matches", get(catalog::routes::list_matches))
+        .route("/admin/matches/merge", post(catalog::routes::merge_override))
+        .route("/admin/matches/split", post(catalog::routes::split_override))
 }

@@ -14,6 +14,7 @@ use crate::models::routing::{RoutingCandidate, ScoredCandidate};
 use crate::models::venue::VenueMarket;
 use crate::repositories::health_repository::HealthRegistry;
 use crate::repositories::market_repository::MarketSort;
+use crate::repositories::quote_cache::QuoteCache;
 use crate::services::VenueAdapter;
 use crate::services::maths::routing as routing_maths;
 
@@ -58,6 +59,7 @@ pub async fn rank_with_quotes<'a>(
     sort: MarketSort,
     venue_lookup: impl Fn(&str) -> Option<Arc<dyn VenueAdapter>>,
     health: &HealthRegistry,
+    cache: &QuoteCache,
 ) -> Vec<(&'a VenueMarket, ScoredCandidate)> {
     let quoted = futures::future::join_all(shortlist.iter().map(|market| {
         let adapter = venue_lookup(&market.venue_id);
@@ -67,9 +69,8 @@ pub async fn rank_with_quotes<'a>(
                 return None;
             };
             let venue_id = adapter.id();
-            match adapter.quote(&market.venue_market_id, side, size_usdc).await {
+            match crate::services::quoting::quote(&adapter, &market.venue_market_id, side, size_usdc, health, cache).await {
                 Ok(quote) => {
-                    health.record_success(venue_id);
                     Some((
                         *market,
                         RoutingCandidate {
@@ -90,7 +91,6 @@ pub async fn rank_with_quotes<'a>(
                         tracing::debug!("{venue_id}: no quote for {}: {err}", market.venue_market_id);
                     } else {
                         tracing::warn!("{venue_id}: quote failed for {}: {err}", market.venue_market_id);
-                        health.record_failure(venue_id, err.to_string());
                     }
                     None
                 }

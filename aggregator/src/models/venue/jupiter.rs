@@ -8,7 +8,6 @@
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-use super::Category;
 use super::timestamp::{deserialize_optional_timestamp, deserialize_timestamp};
 
 /// Offset-based pagination info from `GET /events` - not a cursor token like every other venue.
@@ -37,11 +36,30 @@ pub struct JupEventsResponse {
 }
 
 /// One event from `GET /events` - the category lives here, not on any individual market.
-#[derive(Debug, Deserialize)]
+///
+/// Fields confirmed in the Phase 0 capture (`docs/venue-fields.md`). Anything not modelled here
+/// lands in `extra`, so nothing Jupiter sends is dropped.
+#[derive(Debug, Deserialize, Default)]
 pub struct JupEvent {
     #[serde(rename = "eventId")]
     pub event_id: String,
     pub category: String,
+    /// League or asset class, e.g. `mlb`, `cs2`, `btc`. Empty on about half of events.
+    #[serde(default)]
+    pub subcategory: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Total volume, micro-USD as a string.
+    #[serde(rename = "volumeUsd", default)]
+    pub volume_usd: Option<String>,
+    /// Last-24h volume, micro-USD as a string.
+    #[serde(rename = "volume24hr", default)]
+    pub volume_24hr: Option<String>,
+    /// When the real-world event starts - Unix seconds as a fractional string.
+    #[serde(rename = "beginAt", default, deserialize_with = "deserialize_optional_timestamp")]
+    pub begin_at: Option<i64>,
+    #[serde(rename = "closeCondition", default)]
+    pub close_condition: Option<String>,
     /// Where the actual question lives. Each `JupMarket` below carries only its own outcome
     /// label, so without this a market reads as "Up", "160-179" or "September 21" - a fragment
     /// with nothing to attach it to.
@@ -49,16 +67,33 @@ pub struct JupEvent {
     pub metadata: Option<JupEventMetadata>,
     #[serde(default)]
     pub markets: Vec<JupMarket>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Event-level display data from `GET /events`.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct JupEventMetadata {
     /// The question, e.g. "What price will Bitcoin hit in 2026?".
     #[serde(default)]
     pub title: String,
     #[serde(default)]
     pub subtitle: Option<String>,
+    #[serde(rename = "imageUrl", default)]
+    pub image_url: Option<String>,
+    #[serde(default)]
+    pub slug: Option<String>,
+    /// Competition name, e.g. "Dota 2". Set on about one event in ten.
+    #[serde(default)]
+    pub league: Option<String>,
+}
+
+/// A team attached to a market (`isTeamMarket`).
+#[derive(Debug, Deserialize, Clone)]
+pub struct JupTeam {
+    pub name: String,
+    #[serde(default)]
+    pub abbreviation: Option<String>,
     #[serde(rename = "imageUrl", default)]
     pub image_url: Option<String>,
 }
@@ -80,7 +115,7 @@ pub struct JupMarketPricing {
 
 /// One binary market - fields are flat, no nested metadata, matching Jupiter's own OpenAPI
 /// `Market` schema. Has no category of its own; that's an event-level property.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct JupMarket {
     #[serde(rename = "marketId")]
     pub market_id: String,
@@ -104,28 +139,30 @@ pub struct JupMarket {
     #[serde(rename = "rulesPrimary", default)]
     pub rules_primary: Option<String>,
     pub pricing: Option<JupMarketPricing>,
+    /// Where Jupiter sources the market: `polymarket` or `kalshi`.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Outcome labels, e.g. `["Falcons", "Packers"]` - both sides of a matchup.
+    #[serde(default)]
+    pub outcomes: Vec<String>,
+    #[serde(default)]
+    pub team: Option<JupTeam>,
+    /// `moneyline`, … - set on sports markets only.
+    #[serde(rename = "sportsMarketType", default)]
+    pub sports_market_type: Option<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// The categories Jupiter's `category` filter accepts - it 400s on anything else, so this is a
-/// hard allow-list, not a hint. Confirmed live from its own rejection message: `all|crypto|
-/// sports|politics|esports|culture|economics|tech|finance|climate & science|weather|mentions`.
-/// Returns `None` for a canonical category Jupiter has no equivalent for.
-pub fn category_to_native(category: &Category) -> Option<&'static str> {
-    match category {
-        Category::Crypto => Some("crypto"),
-        Category::Sports => Some("sports"),
-        Category::Politics => Some("politics"),
-        Category::Esports => Some("esports"),
-        Category::Culture => Some("culture"),
-        Category::Economics => Some("economics"),
-        Category::Technology => Some("tech"),
-        Category::Finance => Some("finance"),
-        Category::Science => Some("climate & science"),
-        Category::Weather => Some("weather"),
-        // Jupiter has no entertainment/world bucket.
-        _ => None,
-    }
-}
+/// The categories Jupiter's `category` filter accepts - it 400s on anything else, and it has no
+/// endpoint that lists them (`GET /categories` is a 404), so this is the one place that knowledge
+/// lives. Confirmed live from its own rejection message; `all` is omitted because the refresh's
+/// unfiltered sweep already covers it. A category Jupiter adds is still picked up by that sweep,
+/// bucketed under its own name, before this list is updated.
+pub const FILTER_CATEGORIES: [&str; 11] = [
+    "crypto", "sports", "politics", "esports", "culture", "economics", "tech", "finance", "climate & science",
+    "weather", "mentions",
+];
 
 /// `GET /orderbook/{id}` response - only the decimal-priced arrays are used; the integer-cents
 /// `yes`/`no` arrays are redundant with these (same data, coarser precision) and skipped.

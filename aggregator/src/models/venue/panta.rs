@@ -10,38 +10,18 @@
 use serde::Deserialize;
 
 use super::timestamp::{deserialize_optional_timestamp, deserialize_timestamp};
-use super::{Category, VenueMarket};
+use super::{Category, VenueEvent, VenueMarket};
 
-/// The categories Panta's `category` filter actually accepts, confirmed live against its own
-/// `GET /categories/`. Returns `None` for a canonical category Panta has no equivalent for, so a
-/// caller filtering by e.g. `esports` simply gets no Panta markets instead of a 400 from Panta.
-pub fn category_to_native(category: &Category) -> Option<&'static str> {
-    match category {
-        Category::Sports => Some("sports"),
-        Category::Crypto => Some("crypto"),
-        Category::Politics => Some("politics"),
-        Category::Entertainment => Some("entertainment"),
-        Category::Finance => Some("finance"),
-        Category::Science => Some("science"),
-        Category::World => Some("world"),
-        Category::Other => Some("other"),
-        // Panta has no esports/culture/economics/tech/weather bucket of its own, and `Unknown`
-        // is by definition something we could not place.
-        _ => None,
-    }
-}
+/// The categories Panta's market-creation flow accepts - its own `GET /categories/`, confirmed
+/// live. Used only to reject a creation request before any call; the catalog refresh reads the
+/// live list from the endpoint instead (see `PantaAdapter::filter_categories`).
+pub const CREATE_CATEGORIES: [&str; 8] =
+    ["sports", "crypto", "politics", "entertainment", "finance", "science", "world", "other"];
 
-/// The canonical categories Panta accepts, derived from `category_to_native` itself.
-///
-/// Derived rather than written out, because the hand-written version of this list drifted from the
-/// mapping and produced an error message that rejected `other` while listing `other` as accepted.
-/// A message that contradicts the code is worse than no message.
-pub fn supported_categories() -> Vec<String> {
-    Category::all()
-        .into_iter()
-        .filter(|c| category_to_native(c).is_some())
-        .map(String::from)
-        .collect()
+/// Panta's `GET /categories/` response.
+#[derive(Debug, Deserialize)]
+pub struct PantaCategoriesResponse {
+    pub categories: Vec<String>,
 }
 
 /// One row of Panta's `/markets/` list response.
@@ -51,7 +31,7 @@ pub fn supported_categories() -> Vec<String> {
 /// filters on) while `status` is Panta's own tradeability flag (`open`/`resolved`/`cancelled`).
 /// Real data confirmed these can disagree (e.g. a market still `phase: "primary"` but already
 /// `status: "cancelled"`) - both are captured so `VenueMarket::dead` can catch either signal.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct PantaMarketRow {
     #[serde(rename = "marketId")]
     pub market_id: String,
@@ -93,20 +73,105 @@ pub struct PantaMarketRow {
     pub primary_yes_price: Option<String>,
     #[serde(rename = "primaryNoPrice")]
     pub primary_no_price: Option<String>,
+    #[serde(default)]
+    pub images: Vec<String>,
+    /// `standard` or `breaking`.
+    #[serde(rename = "marketType", default)]
+    pub market_type: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
+    /// The market's question. **Only on the single-market endpoint** - list rows leave `title`
+    /// and `description` blank (0/84 titled in the Phase 0 capture), so `PantaAdapter` fills text
+    /// in from the detail call.
+    #[serde(default)]
+    pub question: Option<String>,
+    /// Resolution terms - detail endpoint only.
+    #[serde(rename = "resolutionRule", default)]
+    pub resolution_rule: Option<String>,
+    /// Sources of truth for resolution - detail endpoint only.
+    #[serde(default)]
+    pub sources: Vec<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl PantaMarketRow {
+    /// The market's question, from whichever field Panta filled.
+    pub fn text(&self) -> Option<String> {
+        [Some(&self.title), self.question.as_ref(), Some(&self.description)]
+            .into_iter()
+            .flatten()
+            .map(|s| s.trim())
+            .find(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    /// Whether this row is in a state it can never leave (resolved or cancelled).
+    pub fn is_terminal(&self) -> bool {
+        self.resolved
+            || ["resolved", "cancelled"].contains(&self.phase.to_lowercase().as_str())
+            || ["resolved", "cancelled"].contains(&self.status.to_lowercase().as_str())
+    }
+
+    /// Takes what the single-market endpoint knows better than the list row: the text fields
+    /// (blank on list rows) and the market's state. List rows lag - in the Phase 0 capture 40 of
+    /// 84 disagreed with their detail, e.g. listed `primary`/`open` while actually `cancelled` or
+    /// `resolved` - so the detail's state wins.
+    pub fn reconcile_with(&mut self, detail: &PantaMarketRow) {
+        self.phase = detail.phase.clone();
+        self.status = detail.status.clone();
+        self.resolved = detail.resolved;
+        self.fill_text_from(detail);
+    }
+
+    /// Copies the text-bearing fields from the detail endpoint's version of this row.
+    fn fill_text_from(&mut self, detail: &PantaMarketRow) {
+        if self.title.trim().is_empty() {
+            self.title = detail.title.clone();
+        }
+        if self.description.trim().is_empty() {
+            self.description = detail.description.clone();
+        }
+        self.question = self.question.take().or_else(|| detail.question.clone());
+        self.resolution_rule = self.resolution_rule.take().or_else(|| detail.resolution_rule.clone());
+        if self.sources.is_empty() {
+            self.sources = detail.sources.clone();
+        }
+    }
 }
 
 /// Terminal states for either `phase` or `status` - a market in any of these can never take
-/// another bet again, regardless of which field says so. `secondary`/`secondary_active` are here
-/// too: Panta has no secondary-market trading API, so a market that has moved on from `primary`
-/// cannot be quoted or routed through this integration even though it isn't finished.
-const DEAD_STATES: [&str; 5] = ["resolved", "cancelled", "closed", "secondary", "secondary_active"];
+/// another bet again, regardless of which field says so.
+const DEAD_STATES: [&str; 3] = ["resolved", "cancelled", "closed"];
+
+/// Past the primary phase: still trading on Panta's on-chain order book, which its API does not
+/// reach, so shown for its prices but never routed to.
+const SECONDARY_STATES: [&str; 2] = ["secondary", "secondary_active"];
 
 impl From<PantaMarketRow> for VenueMarket {
     fn from(row: PantaMarketRow) -> Self {
         let dead = row.resolved
             || DEAD_STATES.contains(&row.phase.to_lowercase().as_str())
             || DEAD_STATES.contains(&row.status.to_lowercase().as_str());
-        let title = if row.title.trim().is_empty() { row.description.trim().to_string() } else { row.title };
+        let display_only = SECONDARY_STATES.contains(&row.phase.to_lowercase().as_str())
+            || SECONDARY_STATES.contains(&row.status.to_lowercase().as_str());
+        let title = row.text().unwrap_or_default();
+        let non_blank = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+        // Panta has no event layer: each market is its own event, so every market has somewhere
+        // to carry its description, image and tags.
+        let event = (!title.is_empty()).then(|| VenueEvent {
+            event_id: row.market_id.clone(),
+            title: title.clone(),
+            description: non_blank(&row.description).filter(|d| *d != title),
+            image_url: row.images.first().cloned(),
+            tags: [row.market_type.clone(), row.region.clone()].into_iter().flatten().filter(|t| !t.is_empty()).collect(),
+            ..Default::default()
+        });
+        let rules = match (row.resolution_rule.as_deref().and_then(non_blank), row.sources.is_empty()) {
+            (Some(rule), true) => Some(rule),
+            (Some(rule), false) => Some(format!("{rule}\n\nSources: {}", row.sources.join(", "))),
+            (None, _) => None,
+        };
         // Prefer the primary-phase prices, which Panta populates far more reliably than the
         // generic pair (50/50 vs 40/50 on a live sample).
         let yes_price = row.primary_yes_price.or(row.yes_price);
@@ -115,11 +180,10 @@ impl From<PantaMarketRow> for VenueMarket {
             venue_id: "panta".to_string(),
             venue_market_id: row.market_id,
             title,
-            // Panta publishes the whole question on the market itself, so there is no parent
-            // event to nest and no separate rules field.
-            event: None,
-            rules: None,
-            category: Category::from(row.category),
+            event,
+            rules,
+            category: Category::from(row.category.as_str()),
+            venue_category: row.category,
             phase: row.phase,
             start_time: row.start_time,
             // Panta reports a real betting cutoff; fall back to resolution only when absent.
@@ -129,6 +193,9 @@ impl From<PantaMarketRow> for VenueMarket {
             no_price,
             liquidity: row.volume_usdc.and_then(|v| v.parse().ok()),
             dead,
+            display_only,
+            extra: row.extra,
+            ..Default::default()
         }
     }
 }
@@ -161,32 +228,6 @@ mod tests {
         #[derive(Deserialize)]
         struct Wrapper(#[serde(deserialize_with = "deserialize_timestamp")] i64);
         serde_json::from_str::<Wrapper>(json).unwrap().0
-    }
-
-    #[test]
-    fn pantas_own_other_bucket_is_reachable() {
-        // The bug this guards: "other" fell into the unrecognised catch-all and mapped to None,
-        // so creating a market in Panta's `other` category was impossible.
-        assert_eq!(category_to_native(&Category::Other), Some("other"));
-    }
-
-    #[test]
-    fn the_advertised_category_list_matches_what_is_actually_accepted() {
-        // The list was hand-written once and drifted, producing an error that rejected "other"
-        // while naming "other" as accepted. Deriving it makes that contradiction impossible.
-        for name in supported_categories() {
-            let parsed = Category::from(name.clone());
-            assert!(
-                category_to_native(&parsed).is_some(),
-                "'{name}' is advertised as accepted but does not map to a Panta category"
-            );
-        }
-    }
-
-    #[test]
-    fn a_category_panta_lacks_is_not_advertised() {
-        assert!(!supported_categories().contains(&"esports".to_string()));
-        assert!(supported_categories().contains(&"other".to_string()));
     }
 
     #[test]
@@ -334,4 +375,55 @@ pub struct PantaRegisterResponse {
     #[allow(dead_code)]
     #[serde(default)]
     pub title: Option<String>,
+}
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> String {
+        std::fs::read_to_string(format!("{}/fixtures/panta/{name}.json", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    /// The first list row whose detail disagrees with it, from the Phase 0 capture.
+    const LISTED_OPEN_ACTUALLY_CANCELLED: &str = "AESrMoZxcTGQibC1rNEmq3oz9qoDqHhomUe6MQEw1k9F";
+
+    fn list_row(id: &str) -> PantaMarketRow {
+        let list: PantaListResponse = serde_json::from_str(&fixture("markets-sports")).unwrap();
+        list.items.into_iter().find(|r| r.market_id == id).expect("row in fixture")
+    }
+
+    #[test]
+    fn list_rows_carry_no_text_and_the_detail_supplies_it() {
+        let mut row = list_row(LISTED_OPEN_ACTUALLY_CANCELLED);
+        assert!(row.text().is_none(), "list rows are blank - that's why details are fetched");
+        let detail: PantaMarketRow = serde_json::from_str(&fixture(&format!("market-{LISTED_OPEN_ACTUALLY_CANCELLED}"))).unwrap();
+        row.reconcile_with(&detail);
+        assert_eq!(row.text().as_deref(), Some("Marco Rubio to win the 2028 Presidential nomination of the Republican Party"));
+        let market = VenueMarket::from(row);
+        assert!(market.rules.as_deref().unwrap().starts_with("Resolve YES, if Marco Rubio"));
+        assert!(market.rules.as_deref().unwrap().contains("Sources: world-politics-reuters"));
+    }
+
+    #[test]
+    fn the_details_state_overrides_a_stale_list_row() {
+        let mut row = list_row(LISTED_OPEN_ACTUALLY_CANCELLED);
+        assert!(VenueMarket::from(row.clone()).is_open(0), "listed as open");
+        let detail: PantaMarketRow = serde_json::from_str(&fixture(&format!("market-{LISTED_OPEN_ACTUALLY_CANCELLED}"))).unwrap();
+        assert!(detail.is_terminal());
+        row.reconcile_with(&detail);
+        assert!(!VenueMarket::from(row).is_open(0), "cancelled per its own record");
+    }
+
+    #[test]
+    fn each_market_is_its_own_event_carrying_images_and_tags() {
+        let detail: PantaMarketRow = serde_json::from_str(&fixture(&format!("market-{LISTED_OPEN_ACTUALLY_CANCELLED}"))).unwrap();
+        let market = VenueMarket::from(detail);
+        let event = market.event.expect("an event per market");
+        assert_eq!(event.event_id, LISTED_OPEN_ACTUALLY_CANCELLED);
+        assert_eq!(event.title, market.title);
+        assert_eq!(event.tags, ["standard", "Global"]);
+        assert_eq!(market.venue_category, "sports");
+        assert!(market.extra.contains_key("oracle"), "unmodelled fields are kept");
+    }
 }

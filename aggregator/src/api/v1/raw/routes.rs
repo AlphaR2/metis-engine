@@ -9,8 +9,10 @@
 //! advance, filter params that are silently ignored. Being able to see the unprocessed payload in
 //! the UI is what separates *their* bug from *ours*.
 //!
-//! GET only. This borrows the venue's credentials, and a relay that could also POST would be a way
-//! to place orders through someone else's key.
+//! GET only, operator-only (behind `ADMIN_TOKEN`), and limited to each venue's read-only catalog
+//! paths. This borrows the venue's credentials: a relay that could also POST would be a way to
+//! place orders through someone else's key, and an open GET relay let anyone spend our rate limit
+//! or reach other endpoints on the venue's host (audit A3).
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -116,8 +118,9 @@ fn coverage_of(rows: &[&serde_json::Map<String, serde_json::Value>]) -> Vec<Fiel
         ("path" = String, Path, description = "Path on the venue's own API, e.g. 'markets/'"),
     ),
     responses(
-        (status = 200, body = RawResponse, description = "The venue's untouched response, plus field coverage."),
-        (status = 400, description = "Unknown venue, or one that supports no raw inspection"),
+        (status = 200, body = RawResponse, description = "The venue's untouched response, plus field coverage. The HTTP status is the venue's own."),
+        (status = 400, description = "Unknown venue, a path outside the venue's allow-list, or a dot segment"),
+        (status = 401, description = "Missing or invalid X-Admin-Token."),
     )
 )]
 /// Proxies a GET to the venue and returns the body untouched.
@@ -129,16 +132,21 @@ pub async fn raw_get(
     Path((venue_id, path)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, ApiError> {
-    let venue = state
-        .aggregator
-        .venues
-        .iter()
-        .find(|v| v.id() == venue_id)
-        .cloned()
+    let venue = state.aggregator.venue(&venue_id)
         .ok_or_else(|| ApiError::BadRequest(format!("no venue '{venue_id}' is enabled")))?;
 
+    let first_segment = path.trim_start_matches('/').split('/').next().unwrap_or_default();
+    let allowed = venue.raw_path_prefixes();
+    if !allowed.contains(&first_segment) {
+        return Err(ApiError::BadRequest(format!(
+            "raw inspection on {venue_id} is limited to paths under: {}",
+            allowed.join(", ")
+        )));
+    }
+
     let query: Vec<(String, String)> = params.into_iter().collect();
-    let text = venue.raw_get(&path, &query).await?;
+    let (upstream_status, text) = venue.raw_get(&path, &query).await?;
+    let status = StatusCode::from_u16(upstream_status).unwrap_or(StatusCode::BAD_GATEWAY);
 
     // Embed the body as JSON when it is JSON, and as a string when it isn't - a venue returning
     // HTML or a bare error is itself informative and shouldn't become a parse failure.
@@ -149,7 +157,7 @@ pub async fn raw_get(
     let coverage = coverage_of(&rows);
 
     Ok((
-        StatusCode::OK,
+        status,
         Json(RawResponse {
             venue_id,
             path,

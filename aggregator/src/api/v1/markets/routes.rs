@@ -12,7 +12,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::errors::ApiError;
 use crate::models::venue::{Category, VenueMarket};
-use crate::repositories::market_repository::MarketSort;
+use crate::repositories::market_repository::{CategoryBreakdown, MarketSort};
 use crate::services::markets::{MAX_LIVE_QUOTES, ScoredWith, rank_with_quotes};
 use crate::services::maths::markets::sort_markets;
 use crate::state::AppState;
@@ -80,6 +80,12 @@ pub struct ListMarketsResponse {
     pub last_refreshed_at: Option<i64>,
     /// `catalog` or `live_quotes`.
     pub scored_with: &'static str,
+    /// The page size actually applied. With `quote_size` it is capped at the live-quote limit,
+    /// so the next page starts at `offset + limit` using *this* value, not the one requested.
+    pub limit: usize,
+    /// Venues whose markets in this category are the last good copy because their most recent
+    /// refresh failed. Empty when everything is current.
+    pub stale_venues: Vec<String>,
 }
 
 #[utoipa::path(
@@ -100,11 +106,12 @@ pub async fn list_markets(
     // Required, and enforced here rather than by making the field non-Option: axum's own
     // rejection for a missing query field is not a message to put in front of a UI.
     let category = match query.category.as_deref().map(str::trim) {
-        Some(raw) if !raw.is_empty() => Category::from(raw.to_string()),
+        Some(raw) if !raw.is_empty() => Category::from(raw),
         _ => {
+            let held = state.aggregator.markets.read().await.category_breakdown();
             return Err(ApiError::BadRequest(format!(
                 "`category` is required - one of: {}",
-                Category::all().into_iter().map(String::from).collect::<Vec<_>>().join(", ")
+                held.into_iter().map(|c| c.category).collect::<Vec<_>>().join(", ")
             )));
         }
     };
@@ -128,40 +135,47 @@ pub async fn list_markets(
     };
 
     let within_days = query.within_days.unwrap_or(DEFAULT_WITHIN_DAYS).clamp(MIN_WITHIN_DAYS, MAX_WITHIN_DAYS);
-    let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let mut limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    // Every market on a live-quoted page is quoted, so the page itself is capped. Capping only the
+    // quoting (and still advancing callers by the requested limit) silently skipped markets.
+    if quote_size.is_some() {
+        limit = limit.min(MAX_LIVE_QUOTES);
+    }
     let offset = query.offset.unwrap_or(0);
 
     let now = now_unix();
-    let store = state.aggregator.markets.read().await;
-    let last_refreshed_at = store.last_refreshed_at();
-
-    let mut matching = store.markets_in(&category, now, within_days * 86_400, query.venue.as_deref());
-    let total = matching.len();
-    sort_markets(&mut matching, sort, side);
+    // Take the page and release the store's read lock before any network call. The live path
+    // below can wait on venues for many seconds; holding the lock across that would queue the
+    // refresh's write behind it, and every other reader behind the write.
+    let (page, total, last_refreshed_at, stale_venues) = {
+        let store = state.aggregator.markets.read().await;
+        let mut matching = store.markets_in(&category, now, within_days * 86_400, query.venue.as_deref());
+        let total = matching.len();
+        sort_markets(&mut matching, sort, side);
+        let page: Vec<VenueMarket> = matching.into_iter().skip(offset).take(limit).cloned().collect();
+        (page, total, store.last_refreshed_at(), store.stale_venues_for(&category))
+    };
 
     let (entries, scored_with) = match quote_size {
         // Cheap path: the catalog ordering is the answer.
         None => {
-            let page: Vec<MarketEntry> = matching
+            let page: Vec<MarketEntry> = page
                 .into_iter()
-                .skip(offset)
-                .take(limit)
-                .map(|market| MarketEntry { market: market.clone(), quoted_price: None, fully_executable: None })
+                .map(|market| MarketEntry { market, quoted_price: None, fully_executable: None })
                 .collect();
             (page, ScoredWith::Catalog)
         }
-        // Live path: re-price the shortlist the cheap sort produced. Only the markets that could
-        // actually be reached on this page are worth quoting.
+        // Live path: re-price the page the cheap sort produced.
         Some(size) => {
-            let shortlist: Vec<&VenueMarket> =
-                matching.into_iter().skip(offset).take(limit.min(MAX_LIVE_QUOTES)).collect();
+            let shortlist: Vec<&VenueMarket> = page.iter().collect();
             let ranked = rank_with_quotes(
                 &shortlist,
                 size,
                 side,
                 sort,
-                |venue_id| state.aggregator.venues.iter().find(|v| v.id() == venue_id).cloned(),
+                |venue_id| state.aggregator.venue(venue_id),
                 &state.aggregator.health,
+                &state.aggregator.quotes,
             )
             .await;
 
@@ -187,26 +201,30 @@ pub async fn list_markets(
         total,
         last_refreshed_at,
         scored_with: scored_with.as_str(),
+        limit,
+        stale_venues,
     }))
 }
 
 /// Response for `GET /categories`.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CategoriesResponse {
-    /// Every category `GET /markets?category=` accepts.
+    /// Every category currently holding markets - the values `GET /markets?category=` accepts.
     pub categories: Vec<String>,
+    /// Per category: the market count, and which venues hold it under which of their own names.
+    pub breakdown: Vec<CategoryBreakdown>,
 }
 
 #[utoipa::path(
     get,
     path = "/categories",
     tag = "markets",
-    responses((status = 200, body = CategoriesResponse, description = "Every category the markets endpoint accepts."))
+    responses((status = 200, body = CategoriesResponse, description = "Every category the venues currently hold markets in."))
 )]
-/// Lists the categories a caller may filter by - `category` is required on `/markets`, so a UI
-/// needs a way to discover the valid values rather than hardcoding them.
-pub async fn list_categories() -> Json<CategoriesResponse> {
-    Json(CategoriesResponse {
-        categories: Category::all().into_iter().map(String::from).collect(),
-    })
+/// Lists the categories a caller may filter by. They come from the venues - each venue's own list
+/// plus whatever its markets report - so a category a venue adds shows up here without a release.
+/// Names that differ only in wording across venues are merged (see `CategoryAliases`).
+pub async fn list_categories(State(state): State<AppState>) -> Json<CategoriesResponse> {
+    let breakdown = state.aggregator.markets.read().await.category_breakdown();
+    Json(CategoriesResponse { categories: breakdown.iter().map(|c| c.category.clone()).collect(), breakdown })
 }

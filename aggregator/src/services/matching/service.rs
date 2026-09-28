@@ -143,7 +143,7 @@ mod tests {
             title: title.to_string(),
             event: None,
             rules: None,
-            category: Category::Sports,
+            category: Category::from("sports"),
             phase: "open".to_string(),
             start_time: 1_000,
             close_time: resolution_time,
@@ -152,6 +152,7 @@ mod tests {
             no_price: Some("0.5".to_string()),
             liquidity: None,
             dead: false,
+            ..Default::default()
         }
     }
 

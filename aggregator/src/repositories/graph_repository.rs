@@ -94,7 +94,7 @@ mod tests {
         Event {
             event_id: id.to_string(),
             title: id.to_string(),
-            category: Category::Sports,
+            category: Category::from("sports"),
             start_time,
             resolution_time,
             propositions: vec![],
@@ -153,10 +153,10 @@ mod tests {
         let mut graph = CanonicalGraph::new();
         graph.insert(event("sporty", NOW + 5 * HOUR, NOW + 10 * HOUR));
         let mut political = event("polity", NOW + 6 * HOUR, NOW + 10 * HOUR);
-        political.category = Category::Politics;
+        political.category = Category::from("politics");
         graph.insert(political);
 
-        let events = graph.events_within(NOW, 72, Some(&Category::Politics));
+        let events = graph.events_within(NOW, 72, Some(&Category::from("politics")));
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_id, "polity");
     }

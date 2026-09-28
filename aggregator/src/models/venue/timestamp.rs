@@ -26,7 +26,12 @@ impl RawTimestamp {
     fn to_unix(&self) -> Option<i64> {
         match self {
             RawTimestamp::Unix(secs) => Some(*secs),
-            RawTimestamp::Iso8601(raw) => DateTime::parse_from_rfc3339(raw).map(|dt| dt.timestamp()).ok(),
+            // Jupiter's event `beginAt` is Unix seconds *as a string*, with a fractional part
+            // ("1765844672.163"), so a numeric string is accepted too.
+            RawTimestamp::Iso8601(raw) => DateTime::parse_from_rfc3339(raw)
+                .map(|dt| dt.timestamp())
+                .ok()
+                .or_else(|| raw.trim().parse::<f64>().ok().filter(|secs| secs.is_finite() && *secs > 0.0).map(|secs| secs as i64)),
         }
     }
 }
@@ -83,6 +88,11 @@ mod tests {
     fn accepts_the_millisecond_precision_form_jupiter_sends() {
         // The exact shape that broke a whole Jupiter category before this was handled.
         assert_eq!(required("\"2026-02-05T22:30:49.000Z\""), 1_770_330_649);
+    }
+
+    #[test]
+    fn accepts_unix_seconds_sent_as_a_fractional_string() {
+        assert_eq!(required("\"1765844672.163\""), 1_765_844_672);
     }
 
     #[test]

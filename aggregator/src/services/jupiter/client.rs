@@ -8,8 +8,8 @@ use crate::errors::AdapterError;
 use crate::models::venue::jupiter::{
     JupEvent, JupEventsResponse, JupMarket, JupOrderbookResponse, micro_usd_to_decimal_string,
 };
-use crate::models::venue::{Category, ListParams, MarketPage, VenueEvent, VenueMarket};
-use crate::utils::http::parse_json_with_diagnostics;
+use crate::models::venue::{Category, ListParams, MarketPage, VenueEntity, VenueEvent, VenueMarket};
+use crate::utils::http::{parse_json_with_diagnostics, venue_url, venue_url_for_path};
 
 /// How many events to request per page - Jupiter's pagination is index-range based
 /// (`start`/`end`), not a page-size parameter, so this is just the width of range we ask for.
@@ -29,6 +29,7 @@ fn market_to_venue_market(event: Option<&JupEvent>, market: &JupMarket) -> Venue
     let dead = !market.status.eq_ignore_ascii_case("open");
 
     let event_category = event.map(|e| e.category.as_str()).unwrap_or("");
+    let non_blank = |s: &Option<String>| s.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     // Only surface an event that actually names a question; an empty title would just be a second
     // blank line in the UI.
     let venue_event = event.and_then(|e| {
@@ -40,8 +41,18 @@ fn market_to_venue_market(event: Option<&JupEvent>, market: &JupMarket) -> Venue
         Some(VenueEvent {
             event_id: e.event_id.clone(),
             title: title.to_string(),
-            subtitle: metadata.subtitle.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
-            image_url: metadata.image_url.clone(),
+            subtitle: non_blank(&metadata.subtitle),
+            image_url: non_blank(&metadata.image_url),
+            slug: non_blank(&metadata.slug),
+            description: None,
+            tags: e.tags.clone(),
+            subcategory: non_blank(&e.subcategory),
+            league: non_blank(&metadata.league),
+            start_time: e.begin_at,
+            volume_usdc: e.volume_usd.as_deref().and_then(micro_usd_str_to_decimal),
+            volume_24h_usdc: e.volume_24hr.as_deref().and_then(micro_usd_str_to_decimal),
+            close_condition: non_blank(&e.close_condition),
+            extra: e.extra.clone(),
         })
     });
 
@@ -51,7 +62,8 @@ fn market_to_venue_market(event: Option<&JupEvent>, market: &JupMarket) -> Venue
         title: market.title.clone(),
         event: venue_event,
         rules: market.rules_primary.as_ref().map(|r| r.trim().to_string()).filter(|r| !r.is_empty()),
-        category: Category::from(event_category.to_string()),
+        category: Category::from(event_category),
+        venue_category: event_category.to_string(),
         phase: market.status.clone(),
         start_time: market.open_time,
         close_time: market.close_time,
@@ -62,7 +74,22 @@ fn market_to_venue_market(event: Option<&JupEvent>, market: &JupMarket) -> Venue
         no_price: pricing.and_then(|p| p.buy_no_price_usd).map(micro_usd_to_decimal_string),
         liquidity: pricing.and_then(|p| p.volume).and_then(Decimal::from_f64_retain),
         dead,
+        outcome_labels: market.outcomes.clone(),
+        entity: market.team.as_ref().map(|team| VenueEntity {
+            name: team.name.clone(),
+            abbreviation: team.abbreviation.clone(),
+            image_url: team.image_url.clone(),
+        }),
+        market_kind: non_blank(&market.sports_market_type),
+        provider: non_blank(&market.provider),
+        extra: market.extra.clone(),
+        ..Default::default()
     }
+}
+
+/// Jupiter's event volumes are micro-USD integers sent as strings.
+fn micro_usd_str_to_decimal(raw: &str) -> Option<Decimal> {
+    raw.trim().parse::<i64>().ok().map(|micro| Decimal::new(micro, 6).normalize())
 }
 
 /// Calls Jupiter's `GET /events` and flattens every nested market into one page. `params.cursor`
@@ -101,16 +128,12 @@ pub async fn list_markets(
         query.push(("filter", filter));
     }
     if let Some(category) = params.category {
-        // Jupiter 400s on a category outside its own vocabulary, so send its native string.
-        // A category it doesn't have can't be filtered server-side; skip the param rather than
-        // guaranteeing a rejected request.
-        if let Some(native) = crate::models::venue::jupiter::category_to_native(&category) {
-            query.push(("category", native.to_string()));
-        }
+        // Always Jupiter's own spelling - the refresh passes back what `filter_categories` gave.
+        query.push(("category", category));
     }
 
     let response = client
-        .get(format!("{base_url}/events"))
+        .get(venue_url(base_url, &["events"])?)
         .header("x-api-key", api_key)
         .query(&query)
         .send()
@@ -142,7 +165,7 @@ pub async fn get_market(
     venue_market_id: &str,
 ) -> Result<VenueMarket, AdapterError> {
     let response = client
-        .get(format!("{base_url}/markets/{venue_market_id}"))
+        .get(venue_url(base_url, &["markets", venue_market_id])?)
         .header("x-api-key", api_key)
         .send()
         .await?;
@@ -152,7 +175,7 @@ pub async fn get_market(
     }
 
     // The bare market endpoint has no parent-event category at all - Jupiter's own Market schema
-    // doesn't carry one, category is purely an Event-level property. Left as Category::Unknown("")
+    // doesn't carry one, category is purely an Event-level property. Left empty
     // same discipline as before; list_markets (which does have the event) is the real source.
     let response = response.error_for_status().map_err(|e| AdapterError::Venue(e.to_string()))?;
     let market: JupMarket = parse_json_with_diagnostics(response, "jupiter get_market")
@@ -171,7 +194,7 @@ pub async fn get_orderbook(
     venue_market_id: &str,
 ) -> Result<JupOrderbookResponse, AdapterError> {
     let response = client
-        .get(format!("{base_url}/orderbook/{venue_market_id}"))
+        .get(venue_url(base_url, &["orderbook", venue_market_id])?)
         .header("x-api-key", api_key)
         .send()
         .await?
@@ -192,15 +215,15 @@ pub async fn raw_get(
     api_key: &str,
     path: &str,
     query: &[(String, String)],
-) -> Result<String, AdapterError> {
-    let path = path.trim_start_matches('/');
+) -> Result<(u16, String), AdapterError> {
     let response = client
-        .get(format!("{base_url}/{path}"))
+        .get(venue_url_for_path(base_url, path)?)
         .header("x-api-key", api_key)
         .query(query)
         .send()
         .await?;
-    response.text().await.map_err(AdapterError::Http)
+    let status = response.status().as_u16();
+    Ok((status, response.text().await.map_err(AdapterError::Http)?))
 }
 
 #[cfg(test)]
@@ -218,6 +241,7 @@ mod tests {
             resolve_at: None,
             rules_primary: Some("  Resolves YES if the Dream win.  ".to_string()),
             pricing: None,
+            ..Default::default()
         }
     }
 
@@ -228,9 +252,9 @@ mod tests {
             metadata: Some(JupEventMetadata {
                 title: title.to_string(),
                 subtitle: Some(String::new()),
-                image_url: None,
+                ..Default::default()
             }),
-            markets: vec![],
+            ..Default::default()
         }
     }
 
