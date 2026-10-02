@@ -211,6 +211,9 @@ pub struct PantaListResponse {
 /// Panta's `/primaryorderquote/` response.
 #[derive(Debug, Deserialize)]
 pub struct PantaQuoteResponse {
+    /// The handle `/primaryorderbuild/` takes. Absent on old responses; a buy refuses without it.
+    #[serde(rename = "quoteId", default)]
+    pub quote_id: Option<String>,
     pub shares: String,
     #[serde(rename = "avgPrice")]
     pub avg_price: String,
@@ -426,4 +429,107 @@ mod fixture_tests {
         assert_eq!(market.venue_category, "sports");
         assert!(market.extra.contains_key("oracle"), "unmodelled fields are kept");
     }
+}
+
+
+// ── Orders, claims, positions ───────────────────────────────────────────────────────────────
+//
+// Panta's buy and claim builds return raw instructions and a blockhash, not a finished
+// transaction (its create build does return one). Field names from the published API reference:
+// https://github.com/Kaito-HQ/panta-api-pub/tree/main/api-reference. Money here is decimal USDC
+// strings (`"20.00"`), unlike the creation fees above, which are base units.
+
+/// One account in an instruction.
+#[derive(Debug, Deserialize)]
+pub struct PantaInstructionAccount {
+    pub pubkey: String,
+    #[serde(rename = "isSigner", default)]
+    pub is_signer: bool,
+    #[serde(rename = "isWritable", default)]
+    pub is_writable: bool,
+}
+
+/// One instruction to compile into the transaction.
+#[derive(Debug, Deserialize)]
+pub struct PantaInstruction {
+    #[serde(rename = "programId")]
+    pub program_id: String,
+    /// Base64 instruction data.
+    pub data: String,
+    #[serde(default)]
+    pub accounts: Vec<PantaInstructionAccount>,
+}
+
+/// `POST /primaryorderbuild/` response.
+#[derive(Debug, Deserialize)]
+pub struct PantaOrderBuildResponse {
+    #[serde(rename = "orderId")]
+    pub order_id: String,
+    #[serde(default)]
+    pub wallet: Option<String>,
+    #[serde(rename = "marketId", default)]
+    pub market_id: Option<String>,
+    #[serde(rename = "amountUsdc", default)]
+    pub amount_usdc: Option<String>,
+    #[serde(rename = "expectedShares", default)]
+    pub expected_shares: Option<String>,
+    #[serde(rename = "feeUsdc", default)]
+    pub fee_usdc: Option<String>,
+    pub instructions: Vec<PantaInstruction>,
+    #[serde(rename = "recentBlockhash")]
+    pub recent_blockhash: String,
+    #[serde(rename = "lastValidBlockHeight", default)]
+    pub last_valid_block_height: Option<u64>,
+    #[serde(rename = "expiresAt", default)]
+    pub expires_at: Option<String>,
+    #[serde(rename = "blockhashExpiryHintSec", default)]
+    pub blockhash_expiry_hint_sec: Option<i64>,
+}
+
+/// `POST /claim/build/` response.
+#[derive(Debug, Deserialize)]
+pub struct PantaClaimBuildResponse {
+    #[serde(rename = "winningShares", default)]
+    pub winning_shares: Option<String>,
+    pub instructions: Vec<PantaInstruction>,
+    #[serde(rename = "recentBlockhash")]
+    pub recent_blockhash: String,
+    #[serde(rename = "lastValidBlockHeight", default)]
+    pub last_valid_block_height: Option<u64>,
+}
+
+/// `POST /primaryordersubmit/` and `/primaryorderverify/` response - the same fields cover both.
+#[derive(Debug, Deserialize)]
+pub struct PantaOrderStatusResponse {
+    /// `built`, `submitted`, `confirmed`, `failed` or `expired`.
+    pub status: String,
+    #[serde(rename = "marketId", default)]
+    pub market_id: Option<String>,
+}
+
+/// One row of `GET /positions/`. A wallet holding both sides of a market gets two rows.
+#[derive(Debug, Deserialize)]
+pub struct PantaPositionRow {
+    #[serde(rename = "marketId")]
+    pub market_id: String,
+    #[serde(default)]
+    pub side: String,
+    #[serde(default)]
+    pub shares: String,
+    /// `primary`, `secondary`, `resolved` or `cancelled`.
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub claimable: bool,
+    #[serde(default)]
+    pub claimed: bool,
+    /// `yes` or `no` once resolved, null before.
+    #[serde(default)]
+    pub outcome: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PantaPositionsResponse {
+    #[serde(default)]
+    pub positions: Vec<PantaPositionRow>,
 }

@@ -13,9 +13,9 @@ use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::errors::ApiError;
+use crate::errors::{ApiError, ErrorCode};
 use crate::models::execution::{
-    BuyIntent, ClaimIntent, ConfirmOutcome, CreateMarketIntent, UnsignedTransaction,
+    BuyIntent, ClaimIntent, ConfirmOutcome, CreateMarketIntent, SellIntent, UnsignedTransaction,
 };
 use crate::state::AppState;
 use crate::utils::time::now_unix;
@@ -50,18 +50,51 @@ fn adapter(
 ) -> Result<std::sync::Arc<dyn crate::services::VenueAdapter>, ApiError> {
     state.aggregator.venue(venue_id)
         .ok_or_else(|| {
-            ApiError::BadRequest(format!(
-                "no venue '{venue_id}' is enabled — check ENABLED_VENUES"
-            ))
+            ApiError::bad_request(
+                ErrorCode::UnknownVenue,
+                format!("no venue '{venue_id}' is enabled — check ENABLED_VENUES"),
+            )
         })
 }
 
 /// The refusal a disabled flag produces. Says which switch, so an operator isn't left guessing.
-fn disabled(what: &str, flag: &str) -> ApiError {
-    ApiError::BadRequest(format!(
-        "{what} is disabled on this deployment. Set {flag}=true to enable it. \
-         It is off by default because it moves real funds and cannot be undone."
-    ))
+fn disabled(what: &str, flag: &str, code: ErrorCode) -> ApiError {
+    ApiError::bad_request(
+        code,
+        format!(
+            "{what} is disabled on this deployment. Set {flag}=true to enable it. \
+             It is off by default because it moves real funds and cannot be undone."
+        ),
+    )
+}
+
+/// Refuses a built buy that would deliver fewer shares than the caller's floor.
+///
+/// The check runs against the preview the venue priced at build time, so it catches a price that
+/// moved between the caller's quote and this build. It is **not** an on-chain bound: the venue's
+/// transaction carries none, so a move after this point is still possible. When a floor was asked
+/// for and the venue gave no share count to compare it to, the buy is refused rather than built
+/// with the protection silently absent.
+fn enforce_min_shares(intent: &BuyIntent, transaction: &UnsignedTransaction) -> Result<(), ApiError> {
+    let Some(floor) = intent.min_shares_out else {
+        return Ok(());
+    };
+    let offered = transaction
+        .preview
+        .as_ref()
+        .and_then(|p| p.contracts.as_deref())
+        .and_then(|c| c.parse::<rust_decimal::Decimal>().ok());
+    match offered {
+        Some(shares) if shares >= floor => Ok(()),
+        Some(shares) => Err(ApiError::bad_request(
+            ErrorCode::PriceMoved,
+            format!("price moved: this buy would receive {shares} shares, below the minimum of {floor}. Re-quote and rebuild."),
+        )),
+        None => Err(ApiError::bad_request(
+            ErrorCode::InvalidRequest,
+            "min_shares_out was set but this venue reports no share count to check it against, so the buy was not built",
+        )),
+    }
 }
 
 fn build_response(transaction: UnsignedTransaction) -> Json<BuildResponse> {
@@ -85,10 +118,11 @@ pub async fn build_order(
     Json(intent): Json<BuyIntent>,
 ) -> Result<Json<BuildResponse>, ApiError> {
     if !state.execution_enabled {
-        return Err(disabled("Trading", "EXECUTION_ENABLED"));
+        return Err(disabled("Trading", "EXECUTION_ENABLED", ErrorCode::ExecutionDisabled));
     }
     let venue = adapter(&state, &intent.venue_id)?;
     let transaction = venue.build_buy(&intent).await?;
+    enforce_min_shares(&intent, &transaction)?;
     Ok(build_response(transaction))
 }
 
@@ -108,7 +142,7 @@ pub async fn build_market(
     Json(intent): Json<CreateMarketIntent>,
 ) -> Result<Json<BuildResponse>, ApiError> {
     if !state.market_creation_enabled {
-        return Err(disabled("Market creation", "MARKET_CREATION_ENABLED"));
+        return Err(disabled("Market creation", "MARKET_CREATION_ENABLED", ErrorCode::MarketCreationDisabled));
     }
     let venue = adapter(&state, &intent.venue_id)?;
     let transaction = venue.build_create_market(&intent).await?;
@@ -133,10 +167,38 @@ pub async fn build_claim(
     // A claim only ever pays in, but it rides the same venue plumbing as everything else here, so
     // it stays behind the same switch rather than being quietly always-on.
     if !state.execution_enabled {
-        return Err(disabled("Claiming", "EXECUTION_ENABLED"));
+        return Err(disabled("Claiming", "EXECUTION_ENABLED", ErrorCode::ExecutionDisabled));
     }
     let venue = adapter(&state, &intent.venue_id)?;
     let transaction = venue.build_claim(&intent).await?;
+    Ok(build_response(transaction))
+}
+
+#[utoipa::path(
+    post,
+    path = "/execution/sells",
+    tag = "execution",
+    request_body = SellIntent,
+    responses(
+        (status = 200, body = BuildResponse, description = "An unsigned sell transaction for the caller's wallet to sign."),
+        (status = 400, description = "Execution disabled, unknown venue, or a venue that cannot sell"),
+    )
+)]
+/// Builds a sell that exits a position before its market resolves. Does not sign and does not
+/// broadcast.
+///
+/// A sell, like a buy, only opens an order; the venue fills it afterwards, so its status is polled
+/// the same way. A venue with no sell (Panta: its API trades the primary phase only) answers
+/// `UNSUPPORTED`, and the holder waits for resolution and claims.
+pub async fn build_sell(
+    State(state): State<AppState>,
+    Json(intent): Json<SellIntent>,
+) -> Result<Json<BuildResponse>, ApiError> {
+    if !state.execution_enabled {
+        return Err(disabled("Selling", "EXECUTION_ENABLED", ErrorCode::ExecutionDisabled));
+    }
+    let venue = adapter(&state, &intent.venue_id)?;
+    let transaction = venue.build_sell(&intent).await?;
     Ok(build_response(transaction))
 }
 
@@ -175,6 +237,9 @@ pub struct VenueAbilities {
     pub venue_id: String,
     pub can_execute: bool,
     pub can_create_markets: bool,
+    pub can_list_positions: bool,
+    pub can_claim: bool,
+    pub can_sell: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -207,6 +272,9 @@ pub async fn abilities(State(state): State<AppState>) -> Json<AbilitiesResponse>
                 venue_id: venue.id().to_string(),
                 can_execute: caps.can_execute,
                 can_create_markets: caps.can_create_markets,
+                can_list_positions: caps.can_list_positions,
+                can_claim: caps.can_claim,
+                can_sell: caps.can_sell,
             }
         })
         .collect();
@@ -232,7 +300,12 @@ pub async fn abilities(State(state): State<AppState>) -> Json<AbilitiesResponse>
     )
 )]
 /// Polls a submitted action's status. Read-only - never registers or re-sends anything, so a
-/// venue without a status lookup (Panta today) says so instead of reporting a false failure.
+/// venue without a status lookup for an action (Panta, for a market creation) says so instead of
+/// reporting a false failure.
+///
+/// The venue's answer is about the venue's own record. Whether the money moved is a fact on-chain,
+/// and a client checks the signature there; a `failed` here can be a registration problem while the
+/// transaction landed.
 pub async fn status(
     State(state): State<AppState>,
     Path((venue_id, venue_ref)): Path<(String, String)>,
@@ -240,4 +313,62 @@ pub async fn status(
     let venue = adapter(&state, &venue_id)?;
     let outcome = venue.status(&venue_ref).await?;
     Ok(Json(outcome))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::execution::{IntentKind, OrderPreview, TransactionCost};
+    use rust_decimal::Decimal;
+
+    fn intent(floor: Option<i64>) -> BuyIntent {
+        BuyIntent {
+            venue_id: "jupiter".into(),
+            venue_market_id: "m".into(),
+            side: "yes".into(),
+            amount_usdc: Decimal::from(10),
+            wallet: "W".into(),
+            min_shares_out: floor.map(Decimal::from),
+        }
+    }
+
+    fn built(contracts: Option<&str>) -> UnsignedTransaction {
+        UnsignedTransaction {
+            venue_id: "jupiter".into(),
+            kind: IntentKind::BuyShares,
+            transaction: "b64".into(),
+            venue_ref: "r".into(),
+            expires_at: 0,
+            required_signers: vec![],
+            last_valid_block_height: None,
+            cost: TransactionCost { total_usdc: Decimal::from(10), lines: vec![] },
+            preview: Some(OrderPreview { contracts: contracts.map(str::to_string), ..Default::default() }),
+        }
+    }
+
+    #[test]
+    fn no_floor_means_no_check() {
+        assert!(enforce_min_shares(&intent(None), &built(None)).is_ok());
+    }
+
+    #[test]
+    fn shares_at_or_above_the_floor_pass() {
+        assert!(enforce_min_shares(&intent(Some(20)), &built(Some("20"))).is_ok());
+        assert!(enforce_min_shares(&intent(Some(20)), &built(Some("20.5"))).is_ok());
+    }
+
+    #[test]
+    fn shares_below_the_floor_are_refused() {
+        let err = enforce_min_shares(&intent(Some(20)), &built(Some("19.99"))).unwrap_err();
+        assert!(matches!(err, ApiError::Coded { code: ErrorCode::PriceMoved, ref message, .. } if message.contains("price moved")));
+    }
+
+    #[test]
+    fn a_floor_with_nothing_to_compare_against_fails_closed() {
+        assert!(enforce_min_shares(&intent(Some(20)), &built(None)).is_err());
+        assert!(enforce_min_shares(&intent(Some(20)), &built(Some("not a number"))).is_err());
+        let mut no_preview = built(None);
+        no_preview.preview = None;
+        assert!(enforce_min_shares(&intent(Some(20)), &no_preview).is_err());
+    }
 }

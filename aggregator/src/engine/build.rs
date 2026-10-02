@@ -306,7 +306,7 @@ fn group_related(
 /// One event from several related ones. Questions are kept whole, in date order then by line;
 /// the busiest member lends the image, description and category.
 fn merge_events(key: &str, mut members: Vec<EventNode>, price_day: Option<(EntityRef, NaiveDate)>, now: i64) -> EventNode {
-    members.sort_by(|a, b| b.volume_usdc.cmp(&a.volume_usdc));
+    members.sort_by_key(|m| std::cmp::Reverse(m.volume_usdc));
     let lead = &members[0];
     let titles: Vec<&str> = members.iter().flat_map(|m| m.sources.iter().map(|s| s.title.as_str())).collect();
     let mut questions: Vec<QuestionNode> = members.iter().flat_map(|m| m.questions.iter().cloned()).collect();

@@ -12,7 +12,8 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 
 use crate::errors::AdapterError;
-use crate::models::execution::{BuyIntent, ConfirmOutcome, UnsignedTransaction};
+use crate::models::execution::{BuyIntent, ClaimIntent, ConfirmOutcome, SellIntent, UnsignedTransaction};
+use crate::models::position::Position;
 use crate::models::venue::{
     ListParams, MarketPage, OutcomeFraming, TradingModel, VenueCapabilities, VenueMarket, VenueQuote,
 };
@@ -20,7 +21,7 @@ use crate::services::VenueAdapter;
 use crate::services::maths::orderbook::{Level, walk_book};
 use crate::utils::http::client_with_timeout;
 
-use super::{client, execution};
+use super::{client, execution, positions};
 
 /// Talks to Jupiter Prediction's REST API on behalf of `VenueAdapter`. Base URL and API key both
 /// come from `Config`, passed in at construction.
@@ -28,12 +29,43 @@ pub struct JupiterAdapter {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
+    /// Programs a built transaction may invoke beyond the defaults (`JUPITER_EXTRA_PROGRAMS`).
+    extra_programs: Vec<String>,
 }
+
+/// Jupiter Prediction's issuer program, from its developer documentation
+/// (<https://developers.jup.ag/docs/prediction/forecast>). Every order, sale and claim
+/// transaction it builds goes through this program.
+pub const ISSUER_PROGRAM: &str = "2sVcg2dBSUzXkmdZ8M5cp1LbnzDrWJmr6hktkHwB8nY3";
 
 impl JupiterAdapter {
     /// Builds an adapter for the given base URL and API key.
     pub fn new(base_url: String, api_key: String) -> Self {
-        Self { client: client_with_timeout(), base_url, api_key }
+        Self { client: client_with_timeout(), base_url, api_key, extra_programs: Vec::new() }
+    }
+
+    /// Allows further programs in built transactions, for a program Jupiter adds that this
+    /// service has not been told about yet. Blank entries are ignored.
+    pub fn with_extra_programs(mut self, programs: impl IntoIterator<Item = String>) -> Self {
+        self.extra_programs = programs.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
+        self
+    }
+
+    /// Refuses a transaction Jupiter built unless it is a plain trade for `wallet`: see
+    /// `solana_tx::verify_venue_transaction`. Runs on every buy, sell and claim before the
+    /// transaction leaves this service.
+    fn guard(&self, built: UnsignedTransaction, wallet: &str) -> Result<UnsignedTransaction, AdapterError> {
+        let mut allowed: Vec<&str> = vec![ISSUER_PROGRAM];
+        allowed.extend(crate::utils::solana_tx::COMMON_PROGRAMS);
+        allowed.extend(self.extra_programs.iter().map(String::as_str));
+        crate::utils::solana_tx::verify_venue_transaction(&built.transaction, wallet, &allowed).map_err(|e| {
+            // Refused, not failed: the venue answered, and what it answered is not safe to sign.
+            // Logged loudly because a tampered response and a program Jupiter newly started using
+            // look identical from here, and an operator has to tell which.
+            tracing::error!("jupiter: refused to pass on a built transaction for {wallet}: {e}");
+            AdapterError::Venue(format!("jupiter: {e}"))
+        })?;
+        Ok(built)
     }
 }
 
@@ -68,6 +100,9 @@ impl VenueAdapter for JupiterAdapter {
             can_execute: true,
             // Jupiter surfaces Polymarket/Kalshi markets; it has no create API.
             can_create_markets: false,
+            can_list_positions: true,
+            can_claim: true,
+            can_sell: true,
         }
     }
 
@@ -95,10 +130,29 @@ impl VenueAdapter for JupiterAdapter {
     }
 
     async fn build_buy(&self, intent: &BuyIntent) -> Result<UnsignedTransaction, AdapterError> {
-        execution::build_buy(&self.client, &self.base_url, &self.api_key, intent).await
+        let built = execution::build_buy(&self.client, &self.base_url, &self.api_key, intent).await?;
+        self.guard(built, &intent.wallet)
+    }
+
+    async fn build_claim(&self, intent: &ClaimIntent) -> Result<UnsignedTransaction, AdapterError> {
+        let built = positions::build_claim(&self.client, &self.base_url, &self.api_key, intent).await?;
+        self.guard(built, &intent.wallet)
+    }
+
+    async fn build_sell(&self, intent: &SellIntent) -> Result<UnsignedTransaction, AdapterError> {
+        let built = positions::build_sell(&self.client, &self.base_url, &self.api_key, intent).await?;
+        self.guard(built, &intent.wallet)
+    }
+
+    async fn positions(&self, wallet: &str) -> Result<Vec<Position>, AdapterError> {
+        positions::list_positions(&self.client, &self.base_url, &self.api_key, wallet).await
     }
 
     async fn status(&self, venue_ref: &str) -> Result<ConfirmOutcome, AdapterError> {
+        // A claim has no order of its own; its reference says so and its status is the position's.
+        if crate::models::execution::parse_claim_ref(venue_ref).is_some() {
+            return positions::claim_status(&self.client, &self.base_url, &self.api_key, venue_ref).await;
+        }
         execution::order_status(&self.client, &self.base_url, &self.api_key, venue_ref).await
     }
 
@@ -111,7 +165,7 @@ impl VenueAdapter for JupiterAdapter {
         // built, so it needs nothing from us to look one up. The signature is accepted for
         // interface symmetry and ignored - which also makes this identical to status polling, and
         // therefore safe to call as often as a caller likes.
-        execution::order_status(&self.client, &self.base_url, &self.api_key, venue_ref).await
+        self.status(venue_ref).await
     }
 
     async fn quote(
@@ -134,7 +188,6 @@ impl VenueAdapter for JupiterAdapter {
         // *lowest* bid) is what made every quote come back at ~0.001 regardless of the real price.
         //
         // Hence: reverse to put the best bid first, then invert each price to the cost of buying.
-        // This is the same long/short inversion `PascalAdapter` does, arrived at independently.
         let opposite_side_bids = match side {
             "yes" => &book.no_dollars,
             "no" => &book.yes_dollars,
@@ -226,5 +279,76 @@ mod tests {
         ];
         let levels = parse_levels(&raw);
         assert_eq!(levels.len(), 1);
+    }
+
+    // ── The transaction guard, as the adapter applies it ──────────────────────────────────────
+
+    use crate::models::execution::{IntentKind, TransactionCost};
+    use crate::utils::solana_tx::{self, AccountMeta, Instruction};
+
+    fn key(n: u8) -> solana_tx::Pubkey {
+        let mut k = [0u8; 32];
+        k[0] = n;
+        k[31] = n.wrapping_mul(7).wrapping_add(1);
+        k
+    }
+
+    fn built(instructions: &[Instruction]) -> UnsignedTransaction {
+        use base64::Engine as _;
+        let bytes = solana_tx::compile_unsigned_v0(key(1), instructions, [9; 32]).unwrap();
+        UnsignedTransaction {
+            venue_id: "jupiter".to_string(),
+            kind: IntentKind::BuyShares,
+            transaction: base64::engine::general_purpose::STANDARD.encode(bytes),
+            venue_ref: "Order1".to_string(),
+            expires_at: 0,
+            required_signers: vec![],
+            last_valid_block_height: None,
+            cost: TransactionCost { total_usdc: Decimal::ZERO, lines: vec![] },
+            preview: None,
+        }
+    }
+
+    fn trade_on(program: &str) -> Instruction {
+        Instruction {
+            program_id: solana_tx::decode_32(program).unwrap(),
+            accounts: vec![AccountMeta { pubkey: key(1), is_signer: true, is_writable: true }],
+            data: vec![1],
+        }
+    }
+
+    fn wallet() -> String {
+        solana_tx::encode_32(&key(1))
+    }
+
+    #[test]
+    fn a_trade_through_jupiters_issuer_program_is_passed_on_unchanged() {
+        let adapter = JupiterAdapter::new("http://x".into(), "k".into());
+        let tx = built(&[trade_on(ISSUER_PROGRAM)]);
+        let original = tx.transaction.clone();
+        assert_eq!(adapter.guard(tx, &wallet()).unwrap().transaction, original);
+    }
+
+    #[test]
+    fn a_transaction_invoking_an_unknown_program_is_refused_until_it_is_configured() {
+        let rogue = solana_tx::encode_32(&key(200));
+        let adapter = JupiterAdapter::new("http://x".into(), "k".into());
+        let err = adapter.guard(built(&[trade_on(&rogue)]), &wallet()).unwrap_err();
+        assert!(err.to_string().contains("unexpected program"), "{err}");
+
+        let adapter = adapter.with_extra_programs([format!(" {rogue} "), String::new()]);
+        assert!(adapter.guard(built(&[trade_on(&rogue)]), &wallet()).is_ok(), "an operator can allow it explicitly");
+    }
+
+    #[test]
+    fn a_transaction_built_for_another_wallet_is_refused() {
+        let adapter = JupiterAdapter::new("http://x".into(), "k".into());
+        let other = solana_tx::encode_32(&key(2));
+        assert!(adapter.guard(built(&[trade_on(ISSUER_PROGRAM)]), &other).is_err());
+    }
+
+    #[test]
+    fn the_issuer_program_is_a_valid_key() {
+        assert!(solana_tx::decode_32(ISSUER_PROGRAM).is_ok());
     }
 }

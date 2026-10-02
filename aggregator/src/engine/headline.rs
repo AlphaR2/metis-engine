@@ -245,11 +245,11 @@ fn wh_headline(words: &[&str]) -> String {
                 return strip_article(&x.join(" "));
             }
             // "What price will X hit Y" / "What will X hit Y" → "X price Y"
-            if matches!(lead, "what") && (noun_phrase.is_empty() || noun_phrase.iter().any(|w| text::fold(w) == "price")) {
-                if let Some(v) = verb_index(rest, 1).filter(|&v| ["hit", "reach", "close", "trade", "be"].contains(&text::fold(rest[v]).as_str())) {
-                    let tail = rest[v + 1..].join(" ");
-                    return format!("{} price {tail}", rest[..v].join(" "));
-                }
+            if matches!(lead, "what") && (noun_phrase.is_empty() || noun_phrase.iter().any(|w| text::fold(w) == "price"))
+                && let Some(v) = verb_index(rest, 1).filter(|&v| ["hit", "reach", "close", "trade", "be"].contains(&text::fold(rest[v]).as_str()))
+            {
+                let tail = rest[v + 1..].join(" ");
+                return format!("{} price {tail}", rest[..v].join(" "));
             }
             // "Who will win the X" → "X winner"
             if lead == "who" && rest.first().is_some_and(|w| text::fold(w) == "win") {

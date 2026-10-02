@@ -1,0 +1,46 @@
+name: aggregator
+
+# Runs on the aggregator crate and what it depends on. The venues are replayed from recorded
+# fixtures, so no API keys, no network and no database are needed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # --locked: the build must use exactly the committed Cargo.lock, as the Docker image does.
+      - name: Tests
+        run: cargo test -p metis-aggregator --locked
+      # Warnings are reported, not yet fatal: three pre-existing ones remain (two in test code).
+      # Turn this into `-- -D warnings` once they are fixed.
+      - name: Clippy
+        run: cargo clippy -p metis-aggregator --all-targets --locked
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Advisories in the dependency tree
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The production image builds
+        run: docker build -t metis-api .

@@ -13,7 +13,6 @@ use crate::config::VenueConfig;
 use crate::services::VenueAdapter;
 use crate::services::jupiter::JupiterAdapter;
 use crate::services::panta::{ChainSource, PantaAdapter};
-use crate::services::pascal::PascalAdapter;
 
 /// Per-venue pacing and limits for the refresh. Every field can be set per venue from the
 /// environment (`<ID>_PAGE_CAP`, …); the defaults are what both current venues were tuned to.
@@ -83,7 +82,7 @@ pub fn build_venues(configs: &[VenueConfig]) -> Vec<RegisteredVenue> {
                 None
             }
             Some(adapter) => {
-                if config.api_key.is_empty() && config.kind != "pascal" {
+                if config.api_key.is_empty() {
                     tracing::warn!("{}: no API key set ({}_API_KEY) - every call will fail", config.id, config.env_prefix());
                 }
                 Some(RegisteredVenue { adapter, settings: VenueSettings::from_config(config) })
@@ -114,10 +113,12 @@ fn build_adapter(config: &VenueConfig) -> Option<Arc<dyn VenueAdapter>> {
                 chain,
             )))
         }
-        "jupiter" => Some(Arc::new(JupiterAdapter::new(base_url("https://api.jup.ag/prediction/v1"), config.api_key.clone()))),
-        "pascal" => {
-            tracing::warn!("pascal enabled - its wire schema is unverified (its /markets envelope is {{status, data}}) and it reports no tradeability flag");
-            Some(Arc::new(PascalAdapter::new(base_url("https://data.pascal.trade/api/v1"))))
+        "jupiter" => {
+            let extra = config.option("EXTRA_PROGRAMS").unwrap_or_default();
+            Some(Arc::new(
+                JupiterAdapter::new(base_url("https://api.jup.ag/prediction/v1"), config.api_key.clone())
+                    .with_extra_programs(extra.split(',').map(str::to_string)),
+            ))
         }
         _ => None,
     }

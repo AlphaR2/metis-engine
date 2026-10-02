@@ -27,8 +27,8 @@ fn find_matching_event(graph: &CanonicalGraph, market: &VenueMarket) -> Option<S
 }
 
 /// The venue-native sides for each of a binary proposition's two outcomes, and the labels
-/// a UI should show - framing-dependent since "Yes"/"No" isn't meaningful for a LongShort venue
-/// like Pascal, and "long"/"short" isn't a real side on a YesNo venue like Panta/Jupiter.
+/// a UI should show - framing-dependent since "Yes"/"No" isn't meaningful for a LongShort venue,
+/// and "long"/"short" isn't a real side on a YesNo venue like Panta/Jupiter.
 fn outcome_sides_and_labels(framing: OutcomeFraming) -> ((VenueSide, VenueSide), (&'static str, &'static str)) {
     match framing {
         OutcomeFraming::YesNo => ((VenueSide::Yes, VenueSide::No), ("Yes", "No")),
@@ -79,9 +79,9 @@ fn attach_venue_market_ref(
     let ((primary_side, secondary_side), _) = outcome_sides_and_labels(framing);
 
     // Same market/symbol backs both outcomes on every venue integrated so far (Panta and
-    // Jupiter's yes/no, Pascal's long/short) - it's one order book/curve quoted with a different
-    // side per outcome, not two separate venue markets. Attach a ref to each outcome, carrying
-    // the side that actually resolves to it on this venue.
+    // Jupiter's yes/no) - it's one order book/curve quoted with a different side per outcome,
+    // not two separate venue markets. Attach a ref to each outcome, carrying the side that
+    // actually resolves to it on this venue.
     if let Some(prop) = event.propositions.first_mut()
         && let [primary, secondary] = &mut prop.outcomes[..] {
             primary.venue_markets.push(VenueMarketRef {
@@ -184,16 +184,16 @@ mod tests {
     fn a_long_short_venue_attaches_with_its_own_native_sides() {
         let mut graph = CanonicalGraph::new();
         attach_market(&mut graph, "panta", OutcomeFraming::YesNo, market("Lakers vs Celtics", 5_000));
-        attach_market(&mut graph, "pascal", OutcomeFraming::LongShort, market("Lakers vs Celtics", 5_050));
+        attach_market(&mut graph, "longshort_venue", OutcomeFraming::LongShort, market("Lakers vs Celtics", 5_050));
 
         let events: Vec<_> = graph.events().collect();
         assert_eq!(events.len(), 1);
         let primary_refs = &events[0].propositions[0].outcomes[0].venue_markets;
-        let pascal_ref = primary_refs.iter().find(|r| r.venue_id == "pascal").unwrap();
-        assert_eq!(pascal_ref.venue_side, VenueSide::Long);
+        let long_ref = primary_refs.iter().find(|r| r.venue_id == "longshort_venue").unwrap();
+        assert_eq!(long_ref.venue_side, VenueSide::Long);
         let secondary_refs = &events[0].propositions[0].outcomes[1].venue_markets;
-        let pascal_secondary = secondary_refs.iter().find(|r| r.venue_id == "pascal").unwrap();
-        assert_eq!(pascal_secondary.venue_side, VenueSide::Short);
+        let short_ref = secondary_refs.iter().find(|r| r.venue_id == "longshort_venue").unwrap();
+        assert_eq!(short_ref.venue_side, VenueSide::Short);
     }
 
     #[test]

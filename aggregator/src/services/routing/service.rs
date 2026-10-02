@@ -16,10 +16,6 @@ use crate::services::maths::routing as maths;
 
 /// A pluggable way to rank venue candidates - price, liquidity, or a blend.
 pub trait RoutingStrategy: Send + Sync {
-    /// The strategy's own name, e.g. "best_price". Part of the trait contract for logging and
-    /// future response annotation; `strategy_by_name` maps the other direction.
-    #[allow(dead_code)]
-    fn name(&self) -> &'static str;
     /// Ranks `candidates` best-first. Implementations should treat an unroutable (unhealthy)
     /// candidate as always-worse than a routable one, regardless of its price.
     fn rank(&self, candidates: &[RoutingCandidate]) -> Vec<ScoredCandidate>;
@@ -28,9 +24,6 @@ pub trait RoutingStrategy: Send + Sync {
 /// Ranks purely by lowest price.
 pub struct BestPrice;
 impl RoutingStrategy for BestPrice {
-    fn name(&self) -> &'static str {
-        "best_price"
-    }
     fn rank(&self, candidates: &[RoutingCandidate]) -> Vec<ScoredCandidate> {
         maths::score_best_price(candidates)
     }
@@ -39,9 +32,6 @@ impl RoutingStrategy for BestPrice {
 /// Ranks by how much size a venue can actually fill.
 pub struct BestLiquidity;
 impl RoutingStrategy for BestLiquidity {
-    fn name(&self) -> &'static str {
-        "best_liquidity"
-    }
     fn rank(&self, candidates: &[RoutingCandidate]) -> Vec<ScoredCandidate> {
         maths::score_best_liquidity(candidates)
     }
@@ -50,9 +40,6 @@ impl RoutingStrategy for BestLiquidity {
 /// Ranks by whether the full requested size can be filled at all.
 pub struct BestExecution;
 impl RoutingStrategy for BestExecution {
-    fn name(&self) -> &'static str {
-        "best_execution"
-    }
     fn rank(&self, candidates: &[RoutingCandidate]) -> Vec<ScoredCandidate> {
         maths::score_best_execution(candidates)
     }
@@ -61,9 +48,6 @@ impl RoutingStrategy for BestExecution {
 /// The default: a weighted blend of price, liquidity, and fillability.
 pub struct BestOverall;
 impl RoutingStrategy for BestOverall {
-    fn name(&self) -> &'static str {
-        "best_overall"
-    }
     fn rank(&self, candidates: &[RoutingCandidate]) -> Vec<ScoredCandidate> {
         maths::score_best_overall(candidates)
     }
@@ -114,9 +98,8 @@ pub async fn find_best_market(
             let venue_id = adapter.id();
 
             // `venue_ref.venue_side` is this venue's own native side for the outcome being
-            // requested ("yes"/"no" for Panta/Jupiter, "long"/"short" for Pascal) - never a single
-            // side string reused across venues, since the same canonical outcome maps to different
-            // native terms per venue.
+            // requested ("yes"/"no" for Panta/Jupiter) - never a single side string reused across
+            // venues, since the same canonical outcome maps to different native terms per venue.
             let side = venue_ref.venue_side.as_str();
             match crate::services::quoting::quote(&adapter, &venue_ref.venue_market_id, side, requested_size, health, cache).await {
                 Ok(quote) => {
@@ -156,5 +139,7 @@ pub async fn find_best_market(
         fees: best.candidate.fee_usdc,
         execution: if best.candidate.fully_executable { "available" } else { "partial" },
         comparison: ranked,
+        // The caller knows the question; it sets this from the graph.
+        rules_differ: false,
     })
 }

@@ -314,3 +314,160 @@ pub fn micro_usd_to_decimal(micro: i64) -> Decimal {
 pub fn usdc_to_base_units(amount: Decimal) -> i64 {
     (amount * Decimal::from(1_000_000)).trunc().try_into().unwrap_or(0)
 }
+
+// ── Positions, claims ───────────────────────────────────────────────────────────────────────
+//
+// Field names from Jupiter's published OpenAPI spec (`GET /positions`, `POST
+// /positions/{positionPubkey}/claim`). The spec types the USD fields as strings while the
+// documentation elsewhere says integers, so every micro-USD field here accepts a string, an
+// integer or a float rather than trusting either.
+
+/// Micro-USD (1_000_000 = $1.00) sent as a string, an integer, a float or null -> dollars.
+fn deserialize_micro_usd<'de, D>(deserializer: D) -> Result<Option<Decimal>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let micro = match raw {
+        Some(serde_json::Value::String(text)) => text.trim().parse::<Decimal>().ok(),
+        Some(serde_json::Value::Number(number)) => number.to_string().parse::<Decimal>().ok(),
+        _ => None,
+    };
+    Ok(micro.map(|m| m / Decimal::from(1_000_000)))
+}
+
+/// `GET /positions` response envelope.
+#[derive(Debug, Deserialize)]
+pub struct JupPositionsResponse {
+    #[serde(default)]
+    pub data: Vec<JupPosition>,
+    pub pagination: JupPagination,
+}
+
+/// One position. Only the fields the API reports on are modelled; the rest of what Jupiter sends is
+/// dropped here because nothing reads it.
+#[derive(Debug, Deserialize, Default)]
+pub struct JupPosition {
+    /// The position account - what a claim or a sell is keyed on.
+    pub pubkey: String,
+    #[serde(rename = "ownerPubkey", default)]
+    pub owner_pubkey: Option<String>,
+    #[serde(rename = "marketId")]
+    pub market_id: String,
+    #[serde(rename = "isYes", default)]
+    pub is_yes: bool,
+    #[serde(rename = "contractsDecimal", default)]
+    pub contracts_decimal: Option<String>,
+    #[serde(rename = "contractsMicro", default)]
+    pub contracts_micro: Option<String>,
+    #[serde(rename = "totalCostUsd", default, deserialize_with = "deserialize_micro_usd")]
+    pub total_cost: Option<Decimal>,
+    #[serde(rename = "avgPriceUsd", default, deserialize_with = "deserialize_micro_usd")]
+    pub avg_price: Option<Decimal>,
+    #[serde(rename = "valueUsd", default, deserialize_with = "deserialize_micro_usd")]
+    pub value: Option<Decimal>,
+    #[serde(rename = "pnlUsd", default, deserialize_with = "deserialize_micro_usd")]
+    pub pnl: Option<Decimal>,
+    #[serde(rename = "payoutUsd", default, deserialize_with = "deserialize_micro_usd")]
+    pub payout: Option<Decimal>,
+    /// Orders placed on this position that have not filled yet.
+    #[serde(rename = "openOrders", default)]
+    pub open_orders: u32,
+    #[serde(default)]
+    pub claimed: bool,
+    #[serde(default)]
+    pub claimable: bool,
+    #[serde(rename = "updatedAt", default, deserialize_with = "deserialize_optional_timestamp")]
+    pub updated_at: Option<i64>,
+    /// When the market settled, if it has.
+    #[serde(rename = "settlementDate", default, deserialize_with = "deserialize_optional_timestamp")]
+    pub settlement_date: Option<i64>,
+    #[serde(rename = "marketMetadata", default)]
+    pub market_metadata: Option<serde_json::Value>,
+    #[serde(rename = "eventMetadata", default)]
+    pub event_metadata: Option<serde_json::Value>,
+}
+
+impl JupPosition {
+    /// Shares held. `contractsDecimal` is the exact figure; the micro count is the fallback.
+    pub fn contracts(&self) -> Decimal {
+        self.contracts_decimal
+            .as_deref()
+            .and_then(|c| c.trim().parse::<Decimal>().ok())
+            .or_else(|| {
+                self.contracts_micro
+                    .as_deref()
+                    .and_then(|c| c.trim().parse::<Decimal>().ok())
+                    .map(|m| m / Decimal::from(1_000_000))
+            })
+            .unwrap_or_default()
+    }
+
+    /// The market's title from whichever metadata block carries one.
+    pub fn title(&self) -> Option<String> {
+        [&self.market_metadata, &self.event_metadata].into_iter().flatten().find_map(|meta| {
+            ["title", "name"].iter().find_map(|key| meta.get(*key)?.as_str().map(str::to_string))
+        })
+    }
+}
+
+/// `POST /positions/{positionPubkey}/claim` response.
+#[derive(Debug, Deserialize)]
+pub struct JupClaimResponse {
+    /// Base64 unsigned transaction.
+    pub transaction: String,
+    #[serde(rename = "txMeta", default)]
+    pub tx_meta: Option<JupTxMeta>,
+    #[serde(default)]
+    pub position: Option<JupClaimPosition>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct JupClaimPosition {
+    #[serde(rename = "contractsDecimal", default)]
+    pub contracts_decimal: Option<String>,
+    #[serde(rename = "payoutAmountUsd", default, deserialize_with = "deserialize_micro_usd")]
+    pub payout: Option<Decimal>,
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::*;
+
+    #[test]
+    fn usd_fields_accept_a_string_an_integer_a_float_or_null() {
+        let position: JupPosition = serde_json::from_str(
+            r#"{"pubkey":"P","marketId":"M","isYes":true,
+                "totalCostUsd":"5000000","avgPriceUsd":520000,"valueUsd":4900000.0,"pnlUsd":null,
+                "contractsDecimal":"9.615384","claimable":false,"claimed":false,"openOrders":1}"#,
+        )
+        .unwrap();
+        assert_eq!(position.total_cost, Some(Decimal::from(5)));
+        assert_eq!(position.avg_price, Some("0.52".parse().unwrap()));
+        assert_eq!(position.value, Some("4.9".parse().unwrap()));
+        assert_eq!(position.pnl, None, "null is unknown, never zero");
+        assert_eq!(position.contracts(), "9.615384".parse::<Decimal>().unwrap());
+        assert_eq!(position.open_orders, 1);
+    }
+
+    #[test]
+    fn contracts_fall_back_to_the_micro_count() {
+        let position: JupPosition =
+            serde_json::from_str(r#"{"pubkey":"P","marketId":"M","contractsMicro":"2500000"}"#).unwrap();
+        assert_eq!(position.contracts(), "2.5".parse::<Decimal>().unwrap());
+    }
+
+    #[test]
+    fn the_title_comes_from_whichever_metadata_has_one() {
+        let position: JupPosition = serde_json::from_str(
+            r#"{"pubkey":"P","marketId":"M","marketMetadata":{"title":"Will it rain?"},"eventMetadata":{"title":"Weather"}}"#,
+        )
+        .unwrap();
+        assert_eq!(position.title().as_deref(), Some("Will it rain?"));
+    }
+
+    #[test]
+    fn a_position_with_no_optional_fields_still_parses() {
+        assert!(serde_json::from_str::<JupPosition>(r#"{"pubkey":"P","marketId":"M"}"#).is_ok());
+    }
+}

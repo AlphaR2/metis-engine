@@ -2878,24 +2878,34 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
+ "bs58",
  "chrono",
  "dotenvy",
  "futures",
+ "http-body-util",
  "once_cell",
  "prometheus",
+ "regex",
  "reqwest 0.13.5",
  "rust_decimal",
  "serde",
  "serde_json",
+ "solana-hash 4.5.0",
+ "solana-instruction",
+ "solana-message 4.4.1",
+ "solana-pubkey 4.2.1",
  "sqlx",
  "strsim",
  "thiserror 2.0.20",
  "tokio",
+ "tower",
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
  "utoipa",
  "utoipa-swagger-ui",
+ "zstd",
 ]
 
 [[package]]
@@ -2947,10 +2957,6 @@ dependencies = [
  "solana-signer",
  "solana-transaction 4.1.6",
 ]
-
-[[package]]
-name = "metis-sdk"
-version = "0.1.0"
 
 [[package]]
 name = "mime"
@@ -8135,6 +8141,7 @@ dependencies = [
  "http-body",
  "percent-encoding",
  "pin-project-lite",
+ "tokio",
  "tower-layer",
  "tower-service",
  "tracing",

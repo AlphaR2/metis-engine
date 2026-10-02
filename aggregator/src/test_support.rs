@@ -83,6 +83,9 @@ impl VenueAdapter for ScriptedVenue {
             cursor_pagination_advances: true,
             can_execute: false,
             can_create_markets: false,
+            can_list_positions: false,
+            can_claim: false,
+            can_sell: false,
         }
     }
 

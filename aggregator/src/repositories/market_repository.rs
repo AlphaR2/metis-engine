@@ -1,50 +1,15 @@
 //! In-memory store for raw venue markets, keyed by (venue, category).
 //!
-//! This is the backing store for `GET /markets`, the markets-first discovery path. Unlike
-//! `graph_repository`'s `CanonicalGraph` it does no matching, grouping or canonicalization - a
-//! market goes in exactly as the venue reported it and comes out the same way. The canonical
-//! event graph still exists alongside this and is fed by the same refresh; it earns its keep once
-//! several venues quote the same event, which is not the situation today.
+//! This is the source the `/v1` event graph is rebuilt from, and what is persisted. It does no
+//! matching, grouping or canonicalization - a market goes in exactly as the venue reported it and
+//! comes out the same way.
 //!
 //! Buckets are **replaced wholesale**, never appended to (`replace_bucket`). That is what keeps
-//! memory bounded and stops resolved markets lingering forever - the failure mode the event graph
-//! has, where `refresh()` only ever inserts.
+//! memory bounded and stops resolved markets lingering forever.
 
 use std::collections::HashMap;
 
 use crate::models::venue::{Category, VenueMarket};
-
-/// How a caller wants a market list ordered. Catalog-level only - these rank on what the venue's
-/// own listing already told us, with no extra network calls. The live-quote strategies in
-/// `services::maths::routing` take over when a caller supplies a trade size.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MarketSort {
-    /// Cheapest first on the requested side. Markets with no price sort last.
-    BestPrice,
-    /// Deepest first, by the venue's own reported volume. Markets with no volume sort last.
-    BestLiquidity,
-    /// A blend of cheapness and depth.
-    BestOverall,
-    /// Soonest betting cutoff first - the default.
-    ClosingSoonest,
-}
-
-impl MarketSort {
-    /// Parses the `sort` query param. `None` (absent) means `ClosingSoonest`; an unrecognized
-    /// value is an error rather than a silent fallback, so a UI typo surfaces as a 400 instead of
-    /// mysteriously ignored ordering.
-    pub fn parse(raw: Option<&str>) -> Result<Self, String> {
-        match raw {
-            None | Some("") | Some("closing_soonest") => Ok(MarketSort::ClosingSoonest),
-            Some("best_price") => Ok(MarketSort::BestPrice),
-            Some("best_liquidity") => Ok(MarketSort::BestLiquidity),
-            Some("best_execution") | Some("best_overall") => Ok(MarketSort::BestOverall),
-            Some(other) => Err(format!(
-                "unknown sort '{other}' - expected one of: closing_soonest, best_price, best_liquidity, best_execution, best_overall"
-            )),
-        }
-    }
-}
 
 /// One (venue, category) bucket and how current it is.
 #[derive(Debug)]
@@ -86,10 +51,6 @@ pub struct VenueCategoryNames {
 #[derive(Debug, Default)]
 pub struct MarketStore {
     buckets: HashMap<(String, String), Bucket>,
-    /// Unix seconds of the last completed bucket replacement, or `None` before the first refresh
-    /// finishes. Surfaced on `/markets` so a UI can show data age rather than silently rendering
-    /// a stale or empty catalog as if it were current.
-    last_refreshed_at: Option<i64>,
 }
 
 impl MarketStore {
@@ -107,7 +68,6 @@ impl MarketStore {
         } else {
             self.buckets.insert(key, Bucket { markets, refreshed_at: now, stale: false });
         }
-        self.last_refreshed_at = Some(now);
     }
 
     /// Replaces *every* bucket held for `venue_id` at once. For a venue without a server-side
@@ -118,7 +78,6 @@ impl MarketStore {
         for (category, markets) in by_category {
             self.replace_bucket(venue_id, &category, markets, now);
         }
-        self.last_refreshed_at = Some(now);
     }
 
     /// Records that a refresh of this venue failed. The markets already held are kept - a failed
@@ -178,19 +137,6 @@ impl MarketStore {
             .collect()
     }
 
-    /// Venues whose bucket for `category` is stale, sorted.
-    pub fn stale_venues_for(&self, category: &Category) -> Vec<String> {
-        let wanted = String::from(category.clone());
-        let mut venues: Vec<String> = self
-            .buckets
-            .iter()
-            .filter(|((_, bucket_category), bucket)| bucket.stale && *bucket_category == wanted)
-            .map(|((venue_id, _), _)| venue_id.clone())
-            .collect();
-        venues.sort();
-        venues
-    }
-
     /// Freshness of every bucket held.
     pub fn bucket_statuses(&self) -> Vec<BucketStatus> {
         let mut statuses: Vec<BucketStatus> = self
@@ -208,16 +154,12 @@ impl MarketStore {
         statuses
     }
 
-    /// When the store was last written to.
-    pub fn last_refreshed_at(&self) -> Option<i64> {
-        self.last_refreshed_at
-    }
-
     /// Total markets held, across every bucket.
     pub fn len(&self) -> usize {
         self.buckets.values().map(|bucket| bucket.markets.len()).sum()
     }
 
+    #[cfg(test)]
     /// Markets in `category` that can still be bet on and whose betting window closes within
     /// `within_secs` of `now`, optionally narrowed to one venue.
     ///
@@ -346,7 +288,6 @@ mod tests {
         let mut store = store_with(vec![market("a", NOW + DAY)]);
         store.replace_bucket("jupiter", &Category::from("sports"), vec![], NOW + 60);
         assert_eq!(store.len(), 0);
-        assert_eq!(store.last_refreshed_at(), Some(NOW + 60));
     }
 
     #[test]
@@ -387,12 +328,5 @@ mod tests {
         store.replace_venue("jupiter", vec![(Category::from("crypto"), vec![market("b", NOW + DAY)])], NOW + 60);
         assert!(store.markets_in(&Category::from("sports"), NOW, 7 * DAY, None).is_empty());
         assert_eq!(store.markets_in(&Category::from("crypto"), NOW, 7 * DAY, None).len(), 2);
-    }
-
-    #[test]
-    fn sort_parsing_rejects_an_unknown_value() {
-        assert_eq!(MarketSort::parse(None).unwrap(), MarketSort::ClosingSoonest);
-        assert_eq!(MarketSort::parse(Some("best_price")).unwrap(), MarketSort::BestPrice);
-        assert!(MarketSort::parse(Some("cheapest")).is_err());
     }
 }

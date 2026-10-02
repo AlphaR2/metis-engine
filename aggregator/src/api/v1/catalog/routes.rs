@@ -253,6 +253,7 @@ fn filter_events<'g>(graph: &'g EventGraph, query: &ListEventsQuery, now: i64) -
 #[utoipa::path(
     get,
     path = "/v1/events",
+    operation_id = "v1_list_events",
     tag = "v1",
     params(ListEventsQuery),
     responses(
@@ -363,6 +364,7 @@ fn with_context(market: VenueMarket, graph: &EventGraph) -> MarketWithContext {
 #[utoipa::path(
     get,
     path = "/v1/markets",
+    operation_id = "v1_list_markets",
     tag = "v1",
     params(ListMarketsV1Query),
     responses((status = 200, body = MarketsPage, description = "Every venue market, flat, each carrying its event and question."))
@@ -417,6 +419,58 @@ pub async fn get_market(State(state): State<AppState>, Path((venue_id, venue_mar
     Ok(Json(with_context(market, &graph)))
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LiveMarket {
+    #[serde(flatten)]
+    pub market: MarketWithContext,
+    /// When the venue was asked, unix seconds.
+    pub fetched_at: i64,
+    /// True when the catalog also holds this market, so its event context and any field the
+    /// venue's single-market record lacks (Jupiter's category) come from that copy.
+    pub held: bool,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/markets/{venue_id}/{venue_market_id}/live",
+    tag = "v1",
+    params(("venue_id" = String, Path), ("venue_market_id" = String, Path)),
+    responses(
+        (status = 200, body = LiveMarket),
+        (status = 404, description = "Unknown venue, or the venue has no such market."),
+        (status = 502, description = "The venue could not be reached.")
+    )
+)]
+/// One market read from the venue right now, not from the refresh copy. Costs a venue call, so it
+/// is rate-limited like a live quote. Prefer the plain route for anything a refresh-old copy serves.
+pub async fn get_market_live(State(state): State<AppState>, Path((venue_id, venue_market_id)): Path<(String, String)>) -> Result<Json<LiveMarket>, ApiError> {
+    let venue = state.aggregator.venue(&venue_id).ok_or_else(|| ApiError::NotFound(format!("no venue '{venue_id}'")))?;
+    let mut market = venue.get_market(&venue_market_id).await?;
+    if market.venue_id.is_empty() {
+        market.venue_id = venue.id().to_string();
+    }
+    let stored = state
+        .aggregator
+        .markets
+        .read()
+        .await
+        .all_markets()
+        .into_iter()
+        .find(|m| m.venue_id == market.venue_id && m.venue_market_id == market.venue_market_id);
+    let held = stored.is_some();
+    if let Some(stored) = stored {
+        if market.venue_category.is_empty() {
+            market.venue_category = stored.venue_category;
+            market.category = stored.category;
+        }
+        if market.event.is_none() {
+            market.event = stored.event;
+        }
+    }
+    let graph = state.aggregator.events.read().await.clone();
+    Ok(Json(LiveMarket { market: with_context(market, &graph), fetched_at: now_unix(), held }))
+}
+
 // ── Categories and venues ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -427,7 +481,7 @@ pub struct CategoryV1 {
     pub events: usize,
 }
 
-#[utoipa::path(get, path = "/v1/categories", tag = "v1", responses((status = 200, body = Vec<CategoryV1>)))]
+#[utoipa::path(get, path = "/v1/categories", operation_id = "v1_list_categories", tag = "v1", responses((status = 200, body = Vec<CategoryV1>)))]
 /// Categories as the venues report them, with each venue's own names and event/market counts.
 pub async fn list_categories(State(state): State<AppState>) -> Json<Vec<CategoryV1>> {
     let graph = state.aggregator.events.read().await.clone();
@@ -508,9 +562,7 @@ pub async fn route(State(state): State<AppState>, Json(req): Json<RouteRequest>)
     let strategy = strategy_by_name(req.strategy.as_deref()).map_err(ApiError::BadRequest)?;
     let graph = state.aggregator.events.read().await.clone();
     let (_, question) = graph.question(&req.question_id).ok_or_else(|| ApiError::NotFound(format!("no question '{}'", req.question_id)))?;
-    if question.rules_differ {
-        tracing::debug!("routing across listings whose rules differ for {}", question.id);
-    }
+    let rules_differ = question.rules_differ;
     let outcome = question
         .outcomes
         .iter()
@@ -529,7 +581,7 @@ pub async fn route(State(state): State<AppState>, Json(req): Json<RouteRequest>)
     if refs.is_empty() {
         return Err(ApiError::NotFound(format!("no tradable listing for outcome '{}' - its markets are display-only", req.outcome_id)));
     }
-    let recommendation = find_best_market(
+    let mut recommendation = find_best_market(
         &refs,
         &req.size_usdc,
         strategy.as_ref(),
@@ -538,6 +590,7 @@ pub async fn route(State(state): State<AppState>, Json(req): Json<RouteRequest>)
         &state.aggregator.quotes,
     )
     .await?;
+    recommendation.rules_differ = rules_differ;
     Ok(Json(recommendation))
 }
 

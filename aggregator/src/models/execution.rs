@@ -28,6 +28,8 @@ use utoipa::ToSchema;
 pub enum IntentKind {
     /// Buy shares in an existing market.
     BuyShares,
+    /// Sell shares already held, before the market resolves.
+    SellShares,
     /// Create a new market on a venue that allows it.
     CreateMarket,
     /// Collect a payout from a resolved market.
@@ -36,17 +38,6 @@ pub enum IntentKind {
     ClaimCreatorFees,
 }
 
-impl IntentKind {
-    /// Whether this intent moves money *out* of the signer's wallet.
-    ///
-    /// Claims only ever pay in, so a UI can reasonably present them with less ceremony than a
-    /// purchase or a market creation, both of which spend.
-    // Lets a UI give a purchase more ceremony than a claim. Consumed by the frontend.
-    #[allow(dead_code)]
-    pub fn spends_funds(self) -> bool {
-        matches!(self, IntentKind::BuyShares | IntentKind::CreateMarket)
-    }
-}
 
 /// One line of what an action costs.
 ///
@@ -75,20 +66,13 @@ pub struct TransactionCost {
 }
 
 impl TransactionCost {
-    /// A cost with no breakdown - for a venue that reports only a total.
-    // Used by venues that report only a total; Panta itemises, so nothing calls it yet.
-    #[allow(dead_code)]
-    pub fn flat(total_usdc: Decimal) -> Self {
-        Self { total_usdc, lines: Vec::new() }
-    }
-
     /// Whether the itemized lines actually add up to the stated total.
     ///
     /// A mismatch is not automatically an error - a venue may omit a line - but it is something a
     /// caller should be able to notice rather than silently present a breakdown that doesn't
     /// reconcile.
-    // For the signing UI to flag a breakdown that doesn't add up, rather than hide it.
-    #[allow(dead_code)]
+    // Invariant check the venue cost-breakdown tests assert; nothing in the serving path needs it.
+    #[cfg(test)]
     pub fn lines_reconcile(&self) -> bool {
         if self.lines.is_empty() {
             return true;
@@ -124,19 +108,6 @@ pub struct OrderPreview {
     pub max_slippage_bps: Option<i64>,
 }
 
-impl OrderPreview {
-    /// Whether there is anything worth showing. An all-empty preview should be omitted rather than
-    /// rendered as a row of dashes.
-    // Consumed by the signing UI when deciding whether to render the preview block.
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.contracts.is_none()
-            && self.avg_price_usdc.is_none()
-            && self.payout_if_win_usdc.is_none()
-            && self.slippage_bps.is_none()
-            && self.max_slippage_bps.is_none()
-    }
-}
 
 /// A venue-built transaction waiting for the user's signature.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -179,13 +150,6 @@ pub struct UnsignedTransaction {
 }
 
 impl UnsignedTransaction {
-    /// Whether the venue's window has already closed.
-    // The route sends `expires_in_secs`; this is for the order store's expiry sweep.
-    #[allow(dead_code)]
-    pub fn is_expired(&self, now: i64) -> bool {
-        self.expires_at > 0 && now >= self.expires_at
-    }
-
     /// Seconds left before expiry, saturating at zero. Drives the countdown a signing UI shows.
     pub fn seconds_remaining(&self, now: i64) -> i64 {
         if self.expires_at == 0 {
@@ -196,10 +160,6 @@ impl UnsignedTransaction {
 }
 
 /// A request to buy shares in an existing market.
-// Fields are deserialized from the request body and read by each venue's `build_buy`. Only
-// Panta's creation builder is implemented so far, so these read as unused until Jupiter's
-// order builder lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct BuyIntent {
     pub venue_id: String,
@@ -252,14 +212,38 @@ pub struct CreateMarketIntent {
     pub region: Option<String>,
 }
 
+/// `venue_ref` for a pending claim, on any venue: `claim:<owner>:<what is claimed>`.
+///
+/// A claim has no order of its own to poll, so its reference carries the owner and the thing
+/// claimed (Jupiter's position account, Panta's market). That is enough to read the answer back
+/// from the venue's positions, with no stored state.
+pub fn claim_ref(owner: &str, target: &str) -> String {
+    format!("claim:{owner}:{target}")
+}
+
+/// `(owner, target)` from a claim reference, if it is one.
+pub fn parse_claim_ref(venue_ref: &str) -> Option<(&str, &str)> {
+    let rest = venue_ref.strip_prefix("claim:")?;
+    let (owner, target) = rest.split_once(':')?;
+    (!owner.is_empty() && !target.is_empty() && !target.contains(':')).then_some((owner, target))
+}
+
+/// A request to sell a position before its market resolves.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct SellIntent {
+    pub venue_id: String,
+    /// The venue's id for the position being sold - `venue_position_id` from `GET /v1/positions`.
+    pub venue_ref: String,
+    /// The wallet that owns the position, signs, and receives the proceeds.
+    pub wallet: String,
+}
+
 /// A request to claim a payout or accrued creator fees.
-// As `BuyIntent`: deserialized now, read once a venue implements `build_claim`.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct ClaimIntent {
     pub venue_id: String,
     pub kind: IntentKind,
-    /// The venue's id for what is being claimed against - a market or a position.
+    /// What is being claimed against: `claim_ref` from `GET /v1/positions`.
     pub venue_ref: String,
     pub wallet: String,
 }
@@ -295,14 +279,6 @@ pub enum ActionStatus {
     Expired,
 }
 
-impl ActionStatus {
-    /// Whether this status can still change. A caller polls while true and stops when false.
-    // Drives whether a caller keeps polling. Consumed by the order store and the frontend.
-    #[allow(dead_code)]
-    pub fn is_pending(self) -> bool {
-        matches!(self, ActionStatus::Built | ActionStatus::Submitted)
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -317,30 +293,12 @@ mod tests {
             expires_at,
             required_signers: vec!["Wallet1".to_string()],
             last_valid_block_height: None,
-            cost: TransactionCost::flat(Decimal::new(25, 0)),
+            cost: TransactionCost { total_usdc: Decimal::new(25, 0), lines: Vec::new() },
             preview: None,
         }
     }
 
     const NOW: i64 = 1_000_000;
-
-    #[test]
-    fn a_transaction_past_its_window_is_expired() {
-        assert!(tx(NOW - 1).is_expired(NOW));
-        assert!(!tx(NOW + 60).is_expired(NOW));
-    }
-
-    #[test]
-    fn expiry_is_inclusive_of_the_deadline_itself() {
-        // At exactly the deadline the blockhash is already unusable; submitting would waste a fee.
-        assert!(tx(NOW).is_expired(NOW));
-    }
-
-    #[test]
-    fn an_unset_expiry_is_never_treated_as_expired() {
-        // 0 means the venue gave us no window, not "expired in 1970".
-        assert!(!tx(0).is_expired(NOW));
-    }
 
     #[test]
     fn seconds_remaining_never_goes_negative() {
@@ -374,26 +332,12 @@ mod tests {
     }
 
     #[test]
-    fn a_flat_cost_with_no_breakdown_reconciles_trivially() {
-        assert!(TransactionCost::flat(Decimal::new(25, 0)).lines_reconcile());
-    }
-
-    #[test]
-    fn only_buying_and_creating_spend_funds() {
-        assert!(IntentKind::BuyShares.spends_funds());
-        assert!(IntentKind::CreateMarket.spends_funds());
-        assert!(!IntentKind::ClaimWinnings.spends_funds());
-        assert!(!IntentKind::ClaimCreatorFees.spends_funds());
-    }
-
-    #[test]
-    fn only_built_and_submitted_are_worth_polling() {
-        assert!(ActionStatus::Built.is_pending());
-        assert!(ActionStatus::Submitted.is_pending());
-        assert!(!ActionStatus::Confirmed.is_pending());
-        assert!(!ActionStatus::Failed.is_pending());
-        assert!(!ActionStatus::Expired.is_pending());
-        // A partial fill is settled, not in flight - the book gave what it had.
-        assert!(!ActionStatus::PartiallyFilled.is_pending());
+    fn claim_references_round_trip_and_reject_anything_else() {
+        let reference = claim_ref("OWNER", "TARGET");
+        assert_eq!(reference, "claim:OWNER:TARGET");
+        assert_eq!(parse_claim_ref(&reference), Some(("OWNER", "TARGET")));
+        for bad in ["OWNER:TARGET", "claim:", "claim:OWNER", "claim::T", "claim:OWNER:", "claim:A:B:C", "create:x", "order:x"] {
+            assert_eq!(parse_claim_ref(bad), None, "{bad}");
+        }
     }
 }

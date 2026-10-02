@@ -157,7 +157,6 @@ pub async fn list_markets(
 }
 
 /// Calls Jupiter's `GET /markets/{id}` for one market.
-#[allow(dead_code)] // adapter contract; no single-market route yet
 pub async fn get_market(
     client: &reqwest::Client,
     base_url: &str,

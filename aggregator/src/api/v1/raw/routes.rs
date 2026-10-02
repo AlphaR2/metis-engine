@@ -53,8 +53,8 @@ pub struct RawResponse {
 
 /// Finds the first array of objects in a response, wherever the venue chose to put it.
 ///
-/// Envelopes differ - Panta uses `items`, Jupiter `data`, Pascal `markets` - so rather than
-/// hardcode each, this looks for the first array of objects at the top level or one level down.
+/// Envelopes differ - Panta uses `items`, Jupiter `data` - so rather than hardcode each, this
+/// looks for the first array of objects at the top level or one level down.
 fn find_rows(body: &serde_json::Value) -> Vec<&serde_json::Map<String, serde_json::Value>> {
     fn as_rows(v: &serde_json::Value) -> Option<Vec<&serde_json::Map<String, serde_json::Value>>> {
         let arr = v.as_array()?;
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn rows_are_found_inside_whatever_envelope_a_venue_uses() {
-        // Panta wraps in `items`, Jupiter in `data`, Pascal in `markets`.
+        // Panta wraps in `items`, Jupiter in `data` - `markets` stands in for any other envelope key.
         for key in ["items", "data", "markets"] {
             let body = json!({ key: [{"a": 1}, {"a": 2}] });
             assert_eq!(find_rows(&body).len(), 2, "should find rows under '{key}'");

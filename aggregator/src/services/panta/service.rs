@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 
 use crate::errors::AdapterError;
-use crate::models::execution::{ConfirmOutcome, CreateMarketIntent, UnsignedTransaction};
+use crate::models::execution::{BuyIntent, ClaimIntent, ConfirmOutcome, CreateMarketIntent, UnsignedTransaction};
+use crate::models::position::Position;
 use crate::models::venue::panta::PantaMarketRow;
 use crate::models::venue::{
     ListParams, MarketPage, OutcomeFraming, TradingModel, VenueCapabilities, VenueMarket, VenueQuote,
@@ -13,7 +14,7 @@ use crate::models::venue::{
 use crate::services::VenueAdapter;
 use crate::utils::http::client_with_timeout;
 
-use super::{chain, client, create};
+use super::{chain, client, create, orders};
 
 /// Talks to Panta's REST API on behalf of `VenueAdapter`. Base URL and credentials all come from
 /// `Config`, passed in at construction - nothing is hardcoded here.
@@ -50,6 +51,13 @@ impl PantaAdapter {
             details: std::sync::Mutex::new(std::collections::HashMap::new()),
             chain,
         }
+    }
+
+    /// The Panta program whose instructions a built transaction may invoke (besides the common
+    /// token and system programs). The configured one when markets are found on-chain, else the
+    /// published mainnet program.
+    fn venue_program(&self) -> &str {
+        self.chain.as_ref().map_or(chain::PROGRAM_ID, |c| c.program_id.as_str())
     }
 
     /// The single-market record, cached (see `reconcile_with_details`). `None` when the call
@@ -172,6 +180,9 @@ impl VenueAdapter for PantaAdapter {
             // markets/create quote -> build -> register, with creator fees accruing
             // to whoever signs.
             can_create_markets: true,
+            can_list_positions: true,
+            can_claim: true,
+            can_sell: false,
         }
     }
 
@@ -190,6 +201,30 @@ impl VenueAdapter for PantaAdapter {
         create::build_create_market(&self.client, &self.base_url, &self.api_key, intent).await
     }
 
+    async fn build_buy(&self, intent: &BuyIntent) -> Result<UnsignedTransaction, AdapterError> {
+        orders::build_buy(&self.client, &self.base_url, &self.api_key, self.venue_program(), intent).await
+    }
+
+    async fn build_claim(&self, intent: &ClaimIntent) -> Result<UnsignedTransaction, AdapterError> {
+        orders::build_claim(&self.client, &self.base_url, &self.api_key, self.venue_program(), intent).await
+    }
+
+    async fn positions(&self, wallet: &str) -> Result<Vec<Position>, AdapterError> {
+        orders::list_positions(&self.client, &self.base_url, &self.api_key, wallet).await
+    }
+
+    async fn status(&self, venue_ref: &str) -> Result<ConfirmOutcome, AdapterError> {
+        // Read-only. A buy is read back with a verify that carries no signature; a claim from the
+        // wallet's positions. A market creation has no read-only lookup, so it says so.
+        if let Some(order_id) = venue_ref.strip_prefix(orders::ORDER_REF_PREFIX) {
+            return orders::order_status(&self.client, &self.base_url, &self.api_key, order_id).await;
+        }
+        if crate::models::execution::parse_claim_ref(venue_ref).is_some() {
+            return orders::claim_status(&self.client, &self.base_url, &self.api_key, venue_ref).await;
+        }
+        Err(AdapterError::Unsupported { venue: "panta", action: "status lookup for this action" })
+    }
+
     async fn confirm(
         &self,
         venue_ref: &str,
@@ -201,9 +236,17 @@ impl VenueAdapter for PantaAdapter {
             return create::register(&self.client, &self.base_url, &self.api_key, create_id, signature)
                 .await;
         }
+        if let Some(order_id) = venue_ref.strip_prefix(orders::ORDER_REF_PREFIX) {
+            return orders::submit_order(&self.client, &self.base_url, &self.api_key, order_id, signature).await;
+        }
+        // A claim has nothing to register with Panta: the transaction is the claim.
+        if crate::models::execution::parse_claim_ref(venue_ref).is_some() {
+            return orders::claim_status(&self.client, &self.base_url, &self.api_key, venue_ref).await;
+        }
         Err(AdapterError::InvalidRequest(format!(
-            "unrecognised panta reference '{venue_ref}' — expected a '{}' prefix",
-            create::CREATE_REF_PREFIX
+            "unrecognised panta reference '{venue_ref}' — expected a '{}', '{}' or claim prefix",
+            create::CREATE_REF_PREFIX,
+            orders::ORDER_REF_PREFIX
         )))
     }
 

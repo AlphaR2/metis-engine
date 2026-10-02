@@ -31,8 +31,15 @@ sqlx = { workspace = true }
 regex = "1"
 zstd = "0.13"
 base64 = "0.22"
+bs58 = "0.5"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# Only the transaction-encoding tests use these: they check the hand-written v0 encoder in
+# utils/solana_tx.rs against the official implementation.
+solana-message = { workspace = true, features = ["wincode"] }
+solana-instruction = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-hash = "4"

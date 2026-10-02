@@ -1,14 +1,12 @@
 //! Business logic - internal domain services (`matching`, `routing`), the pure numeric engines
-//! backing them (`maths`), and per-vendor venue integrations (`panta`, `jupiter`, `pascal`), each
+//! backing them (`maths`), and per-vendor venue integrations (`panta`, `jupiter`), each
 //! split into `service.rs` (business logic, including any side/venue-specific trading decisions)
 //! + `client.rs` (raw HTTP/wire calls only).
 
 pub mod jupiter;
-pub mod matching;
-pub mod markets;
 pub mod maths;
 pub mod panta;
-pub mod pascal;
+pub mod positions;
 pub mod quoting;
 pub mod registry;
 pub mod routing;
@@ -18,11 +16,12 @@ use rust_decimal::Decimal;
 
 use crate::errors::AdapterError;
 use crate::models::execution::{
-    BuyIntent, ClaimIntent, ConfirmOutcome, CreateMarketIntent, UnsignedTransaction,
+    BuyIntent, ClaimIntent, ConfirmOutcome, CreateMarketIntent, SellIntent, UnsignedTransaction,
 };
+use crate::models::position::Position;
 use crate::models::venue::{ListParams, MarketPage, VenueCapabilities, VenueMarket, VenueQuote};
 
-/// The one interface every venue integration implements - Panta, Jupiter, Pascal.
+/// The one interface every venue integration implements - Panta, Jupiter.
 #[async_trait]
 pub trait VenueAdapter: Send + Sync {
     /// This venue's short, stable identifier, e.g. "panta".
@@ -31,9 +30,9 @@ pub trait VenueAdapter: Send + Sync {
     fn capabilities(&self) -> VenueCapabilities;
     /// Lists this venue's markets, one page at a time.
     async fn list_markets(&self, params: ListParams) -> Result<MarketPage, AdapterError>;
-    /// Fetches one market by this venue's own id for it. Part of the adapter contract; no route
-    /// exposes a single-market lookup yet.
-    #[allow(dead_code)]
+    /// Fetches one market by this venue's own id for it, live from the venue (served by
+    /// `GET /v1/markets/{venue}/{id}/live`). May lack fields only the list carries - Jupiter's
+    /// bare market has no category - so callers overlay what the catalog holds.
     async fn get_market(&self, venue_market_id: &str) -> Result<VenueMarket, AdapterError>;
     /// Prices buying `amount_usdc` of `side` on this market right now.
     async fn quote(
@@ -97,6 +96,20 @@ pub trait VenueAdapter: Send + Sync {
         _intent: &CreateMarketIntent,
     ) -> Result<UnsignedTransaction, AdapterError> {
         Err(AdapterError::Unsupported { venue: self.id(), action: "market creation" })
+    }
+
+    /// Every position `wallet` holds on this venue, normalised. Read-only.
+    ///
+    /// An error means the venue could not be read, which is **not** the same as the wallet holding
+    /// nothing: an implementation must never turn a failure into an empty list, because a portfolio
+    /// that silently loses a venue reads as lost money.
+    async fn positions(&self, _wallet: &str) -> Result<Vec<Position>, AdapterError> {
+        Err(AdapterError::Unsupported { venue: self.id(), action: "listing positions" })
+    }
+
+    /// Builds a sell that exits a position before its market resolves.
+    async fn build_sell(&self, _intent: &SellIntent) -> Result<UnsignedTransaction, AdapterError> {
+        Err(AdapterError::Unsupported { venue: self.id(), action: "selling" })
     }
 
     /// Builds a claim for winnings or accrued creator fees.

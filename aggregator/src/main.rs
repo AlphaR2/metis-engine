@@ -1,10 +1,8 @@
 //! Process bootstrap only: load env, init tracing, hand off to `app::run()`. All server
 //! construction/wiring lives in `app.rs`.
 //!
-//! This service aggregates prediction markets across a curated venue network. `GET /markets`
-//! serves raw venue markets by category, windowed on when betting closes and ranked by
-//! price/liquidity/execution; `/events` keeps the canonical cross-venue event graph for when
-//! several venues quote the same real-world event. See `README.md` for the venue-by-venue notes.
+//! This service aggregates prediction markets across a curated venue network into a canonical event
+//! graph served under `/v1` (see `engine`). See `README.md` for the venue-by-venue notes.
 
 mod aggregator;
 mod api;
@@ -72,6 +70,15 @@ fn load_environment() {
 
 #[tokio::main]
 async fn main() {
+    // `metis-api --print-openapi` writes the API's OpenAPI document to stdout and exits, before any
+    // environment or network is touched. The frontend generates its types from this, so they come
+    // from the code that serves the API rather than from a copy that can drift.
+    if env::args().any(|arg| arg == "--print-openapi") {
+        use utoipa::OpenApi;
+        println!("{}", openapi::ApiDoc::openapi().to_pretty_json().expect("the OpenAPI document serialises"));
+        return;
+    }
+
     load_environment();
 
     // `from_default_env()` silently falls back to "error" only when RUST_LOG is unset, which

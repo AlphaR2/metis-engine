@@ -1,0 +1,11 @@
+target
+.git
+.claude
+**/.env
+**/.env.*
+!**/.env.example
+*-keypair.json
+programs/core/keys
+test-ledger
+.surfpool
+*.log

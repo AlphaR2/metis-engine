@@ -80,7 +80,7 @@ async fn assert_trading_live(
 /// The total is `orderCostUsd` where Jupiter gives one, falling back to what the caller asked to
 /// spend. Fees are listed separately rather than folded in, because a trader comparing venues needs
 /// to see them.
-fn cost_from(order: &crate::models::venue::jupiter::JupOrderDetail, requested: Decimal) -> TransactionCost {
+pub(super) fn cost_from(order: &crate::models::venue::jupiter::JupOrderDetail, requested: Decimal) -> TransactionCost {
     let total = order.order_cost_usd.map(micro_usd_to_decimal).unwrap_or(requested);
 
     let mut lines = Vec::new();
@@ -113,7 +113,7 @@ fn cost_from(order: &crate::models::venue::jupiter::JupOrderDetail, requested: D
 }
 
 /// What the buyer receives, for the pre-sign preview.
-fn preview_from(order: &crate::models::venue::jupiter::JupOrderDetail) -> OrderPreview {
+pub(super) fn preview_from(order: &crate::models::venue::jupiter::JupOrderDetail) -> OrderPreview {
     OrderPreview {
         contracts: order.contracts_decimal.clone(),
         avg_price_usdc: order.new_avg_price_usd.map(micro_usd_to_decimal),
@@ -131,10 +131,11 @@ pub async fn build_buy(
     intent: &BuyIntent,
 ) -> Result<UnsignedTransaction, AdapterError> {
     if intent.amount_usdc < Decimal::from(MIN_DEPOSIT_USDC) {
-        return Err(AdapterError::InvalidRequest(format!(
-            "Jupiter's minimum order is ${MIN_DEPOSIT_USDC}; this one is ${}",
-            intent.amount_usdc
-        )));
+        return Err(AdapterError::BelowMinimum {
+            venue: "Jupiter",
+            minimum_usdc: MIN_DEPOSIT_USDC.to_string(),
+            amount_usdc: intent.amount_usdc.to_string(),
+        });
     }
     let is_yes = match intent.side.to_lowercase().as_str() {
         "yes" => true,
@@ -305,7 +306,7 @@ mod tests {
         // 100 contracts at $1 each if it wins - the number that makes $0.50 meaningful.
         assert_eq!(p.payout_if_win_usdc, Some(Decimal::from(100)));
         assert_eq!(p.max_slippage_bps, Some(100));
-        assert!(!p.is_empty());
+        assert!(p.contracts.is_some() && p.avg_price_usdc.is_some());
     }
 
     #[test]
@@ -315,7 +316,7 @@ mod tests {
         d.new_payout_usd = None;
         let p = preview_from(&d);
         assert!(p.contracts.is_none());
-        assert!(!p.is_empty(), "a partial preview is still worth showing");
+        assert!(p.avg_price_usdc.is_some(), "a partial preview is still worth showing");
     }
 
     #[test]
@@ -330,6 +331,6 @@ mod tests {
     fn a_partial_fill_is_settled_not_still_pending() {
         // It is an outcome, not a stage - the book gave what it had. Treating it as pending would
         // leave a caller polling forever.
-        assert!(!map_status("partiallyfilled").is_pending());
+        assert_eq!(map_status("partiallyfilled"), ActionStatus::PartiallyFilled);
     }
 }

@@ -21,6 +21,29 @@ pub fn client_with_timeout() -> reqwest::Client {
         .expect("reqwest client with a timeout should always build")
 }
 
+/// Turns a non-success venue response into the right [`AdapterError`], keeping the venue's own
+/// words.
+///
+/// `error_for_status()` throws the body away, and the body is where both venues say what went wrong
+/// (`NOT_CLAIMABLE`, `QUOTE_STALE`, `AMOUNT_TOO_SMALL`). A 400, 409 or 422 is the caller's request
+/// being refused, so it becomes `InvalidRequest` carrying that text; anything else is the venue
+/// failing, and stays `Venue`. URLs are redacted, since a body can echo a request URL.
+pub async fn check_status(response: reqwest::Response, context: &str) -> Result<reqwest::Response, crate::errors::AdapterError> {
+    use crate::errors::AdapterError;
+    use crate::errors::adapter_error::redact_urls;
+
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let body = response.text().await.unwrap_or_default();
+    let snippet: String = redact_urls(&body).chars().take(300).collect();
+    match status.as_u16() {
+        400 | 409 | 422 => Err(AdapterError::InvalidRequest(format!("{context}: {snippet}"))),
+        code => Err(AdapterError::Venue(format!("{context}: HTTP {code} - {snippet}"))),
+    }
+}
+
 /// How much of a mismatched response body to keep in a diagnostic error - enough to actually see
 /// what's wrong, not so much it floods `/venues/health`'s `last_error`.
 const BODY_SNIPPET_LEN: usize = 500;

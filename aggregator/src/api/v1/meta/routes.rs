@@ -18,19 +18,56 @@ pub struct HealthResponse {
     pub database_reachable: bool,
 }
 
-/// Liveness check - reports DB pool reachability alongside the process being up, so a caller can
-/// tell "running in-memory-only" apart from "fully healthy" without a separate endpoint.
-#[utoipa::path(get, path = "/health", tag = "meta", responses((status = 200, body = HealthResponse), (status = 503, body = HealthResponse)))]
-pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
-    match &state.db {
-        None => (StatusCode::OK, Json(HealthResponse { status: "ok", database_configured: false, database_reachable: false })),
+/// How long a health probe waits on the database before calling it unreachable.
+const DB_PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Liveness check: the process is up and answering. **Always 200.** A database outage does not stop
+/// this service serving (every read comes from memory), so failing this probe would only get the
+/// process restarted, and a restart drops the in-memory catalog while the database is still down.
+/// The body reports the database state for a human or a dashboard; use `/ready` to gate traffic.
+#[utoipa::path(get, path = "/health", tag = "meta", responses((status = 200, body = HealthResponse)))]
+pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    Json(match &state.db {
+        None => HealthResponse { status: "ok", database_configured: false, database_reachable: false },
         Some(pool) => {
-            let reachable = sqlx::query("SELECT 1").execute(pool).await.is_ok();
-            let status = if reachable { "ok" } else { "degraded" };
-            let code = if reachable { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
-            (code, Json(HealthResponse { status, database_configured: true, database_reachable: reachable }))
+            let reachable = matches!(
+                tokio::time::timeout(DB_PING_TIMEOUT, sqlx::query("SELECT 1").execute(pool)).await,
+                Ok(Ok(_))
+            );
+            HealthResponse {
+                status: if reachable { "ok" } else { "degraded" },
+                database_configured: true,
+                database_reachable: reachable,
+            }
         }
-    }
+    })
+}
+
+/// Response body for `GET /ready`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReadyResponse {
+    pub ready: bool,
+    /// Markets currently held in memory.
+    pub markets: usize,
+    /// Venues whose catalog is a last good copy because their latest refresh failed.
+    pub stale_venues: Vec<String>,
+}
+
+/// Readiness check: whether this instance has a catalog to serve. **503 until the first venue
+/// catalog is held** (from a warm start out of Postgres or a completed refresh), so a load balancer
+/// does not send traffic to an instance that would answer every list with an empty page. A stale
+/// venue does not make it unready: serving the last good catalog is the designed behaviour.
+#[utoipa::path(get, path = "/ready", tag = "meta", responses((status = 200, body = ReadyResponse), (status = 503, body = ReadyResponse)))]
+pub async fn ready(State(state): State<AppState>) -> (StatusCode, Json<ReadyResponse>) {
+    let store = state.aggregator.markets.read().await;
+    let markets = store.len();
+    let mut stale_venues: Vec<String> =
+        store.bucket_statuses().into_iter().filter(|b| b.stale).map(|b| b.venue_id).collect();
+    stale_venues.sort();
+    stale_venues.dedup();
+    let ready = markets > 0;
+    let code = if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    (code, Json(ReadyResponse { ready, markets, stale_venues }))
 }
 
 /// Prometheus text-exposition metrics, behind the admin token.
@@ -63,8 +100,8 @@ pub async fn metrics_route(State(state): State<AppState>) -> String {
 /// Starts a refresh and returns immediately.
 ///
 /// A full pass fans out across every venue and category and takes a while; holding the connection
-/// open for it would guarantee a gateway timeout on any real deployment. `GET /markets` reports
-/// `last_refreshed_at`, which is how a caller observes completion.
+/// open for it would guarantee a gateway timeout on any real deployment. `GET /v1/venues`
+/// reports each venue's staleness, which is how a caller observes completion.
 pub async fn refresh(State(state): State<AppState>) -> (StatusCode, Json<&'static str>) {
     // try_lock inside `refresh()` already prevents overlapping passes; check it here too so the
     // caller gets an honest 409 rather than a 202 for work that won't happen.

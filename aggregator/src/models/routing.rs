@@ -3,7 +3,7 @@
 //! math extracted further into `services::maths::routing`).
 
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use utoipa::ToSchema;
 
 /// One venue's answer for a specific (outcome, size) request, after querying `quote()` and
@@ -53,15 +53,8 @@ pub struct Recommendation {
     /// Every candidate considered, ranked - lets a UI show "best overall" while still surfacing
     /// why (what the runner-up venues looked like).
     pub comparison: Vec<ScoredCandidate>,
-}
-
-/// What a caller sends to ask "where's the best venue for this trade".
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct FindBestMarketRequest {
-    pub event_id: String,
-    pub outcome_id: String,
-    /// Trade size in USDC, as a decimal string.
-    pub size_usdc: String,
-    /// One of "best_price" | "best_liquidity" | "best_execution" | "best_overall" (default).
-    pub strategy: Option<String>,
+    /// True when the venues' listings for this question resolve under different rules (overtime,
+    /// price source, cutoff). The listings were matched by score, not identity, so the compared
+    /// venues are not interchangeable: a client must show this before the user commits money.
+    pub rules_differ: bool,
 }

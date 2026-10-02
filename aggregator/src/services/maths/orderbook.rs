@@ -1,4 +1,4 @@
-//! Shared book-walking math for order-book venues (Jupiter, Pascal). A bonding-curve venue like
+//! Shared book-walking math for order-book venues (Jupiter). A bonding-curve venue like
 //! Panta gets one quote straight from its API; an order-book venue has to compute the effective
 //! fill price/size itself by walking levels until the requested amount is exhausted.
 //!
@@ -19,10 +19,6 @@ pub struct Level {
 pub struct FillResult {
     pub avg_price: Decimal,
     pub filled_size: Decimal,
-    /// USDC actually spent. Not read on the quote path (which reports size and average price),
-    /// but it is the book walk's own accounting and what the unit tests assert against.
-    #[allow(dead_code)]
-    pub filled_notional: Decimal,
     /// true if the book had enough depth to fill the full requested notional.
     pub fully_filled: bool,
 }
@@ -54,7 +50,6 @@ pub fn walk_book(levels: &[Level], notional_usdc: Decimal) -> FillResult {
     FillResult {
         avg_price,
         filled_size,
-        filled_notional,
         fully_filled: remaining <= Decimal::ZERO,
     }
 }
@@ -84,7 +79,7 @@ mod tests {
         ];
         let result = walk_book(&levels, dec("200"));
         assert!(!result.fully_filled);
-        assert_eq!(result.filled_notional, dec("105"));
+        assert_eq!(result.filled_size, dec("200"));
         assert!(result.avg_price > dec("0.50") && result.avg_price < dec("0.55"));
     }
 

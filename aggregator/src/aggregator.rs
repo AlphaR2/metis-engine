@@ -2,14 +2,13 @@
 //! graph, per-venue health and the live-quote cache together. Everything the API layer needs to
 //! serve discovery and routing without knowing venue internals itself.
 //!
-//! `refresh()` feeds the market store from one pass over the venues, then rebuilds both graphs
+//! `refresh()` feeds the market store from one pass over the venues, then rebuilds the event graph
 //! from it:
-//! - `markets` — raw `VenueMarket`s bucketed by (venue, category). Backs `GET /markets`.
+//! - `markets` — raw `VenueMarket`s bucketed by (venue, category). The source the graph is built
+//!   from, and what is persisted.
 //! - `events` — the canonical event graph (`engine`): events, questions, outcomes and rated
 //!   listings, matched across venues. Backs `/v1`. Built fresh and swapped in whole each time,
 //!   so reads never wait on a rebuild and nothing dead accumulates.
-//! - `graph` — the legacy title-similarity graph behind `/events` and `/find-best-market`, kept
-//!   for one release. Also rebuilt fresh each time now, rather than appended to forever (A7).
 //!
 //! Nothing here knows a venue by name. What differs between venues is either the adapter's job or
 //! a `VenueSettings` value from config.
@@ -23,13 +22,12 @@ use crate::engine::graph::EventGraph;
 use crate::engine::matching::{MatchDecision, MatchOverrides};
 use crate::errors::AdapterError;
 use crate::models::venue::{Category, CategoryAliases, ListParams, MarketPage, VenueMarket};
-use crate::repositories::graph_repository::CanonicalGraph;
 use crate::repositories::health_repository::HealthRegistry;
 use crate::repositories::market_repository::MarketStore;
 use crate::repositories::market_store_db;
+use crate::repositories::positions_cache::PositionsCache;
 use crate::repositories::quote_cache::QuoteCache;
 use crate::services::VenueAdapter;
-use crate::services::matching;
 use crate::services::registry::{RegisteredVenue, VenueSettings};
 use crate::utils::time::now_unix;
 
@@ -40,10 +38,8 @@ pub struct Aggregator {
     settings: HashMap<&'static str, VenueSettings>,
     /// Maps each venue's category names onto shared names.
     aliases: CategoryAliases,
-    /// Raw venue markets by (venue, category) - what `GET /markets` serves.
+    /// Raw venue markets by (venue, category) - the source the event graph is built from.
     pub markets: tokio::sync::RwLock<MarketStore>,
-    /// The legacy title-similarity graph behind `/events` and `/find-best-market`.
-    pub graph: tokio::sync::RwLock<CanonicalGraph>,
     /// The canonical event graph behind `/v1`, swapped in whole after every rebuild.
     pub events: tokio::sync::RwLock<Arc<EventGraph>>,
     /// Every cross-venue match decision from the latest rebuild, for `GET /admin/matches`.
@@ -54,6 +50,8 @@ pub struct Aggregator {
     pub health: HealthRegistry,
     /// Seconds-long cache of live quotes, shared by every quoting route.
     pub quotes: QuoteCache,
+    /// Seconds-long cache of complete wallet position reads.
+    pub positions: PositionsCache,
     /// Durability for the market store. `None` means in-memory only (no `DATABASE_URL`), which is
     /// a supported mode - reads never touch this, it only persists what refresh produces and
     /// repopulates the store on boot.
@@ -84,12 +82,12 @@ impl Aggregator {
             aliases,
             db,
             markets: tokio::sync::RwLock::new(MarketStore::new()),
-            graph: tokio::sync::RwLock::new(CanonicalGraph::new()),
             events: tokio::sync::RwLock::new(Arc::new(EventGraph::default())),
             match_decisions: tokio::sync::RwLock::new(Arc::new(Vec::new())),
             overrides: tokio::sync::RwLock::new(MatchOverrides::default()),
             health,
             quotes: QuoteCache::new(),
+            positions: PositionsCache::new(),
             refresh_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -301,20 +299,12 @@ impl Aggregator {
         Ok(self.overrides.read().await.clone())
     }
 
-    /// Rebuilds both graphs from the market store and swaps them in. The event graph is built on
-    /// a blocking thread - it is CPU work over the whole catalog - and replaced in one write, so
-    /// readers see either the old graph or the new one, never a partial one.
+    /// Rebuilds the event graph from the market store and swaps it in. It is built on a blocking
+    /// thread - it is CPU work over the whole catalog - and replaced in one write, so readers see
+    /// either the old graph or the new one, never a partial one.
     pub async fn rebuild_graphs(&self) {
         let markets = self.markets.read().await.all_markets();
         let started = std::time::Instant::now();
-
-        let mut legacy = CanonicalGraph::new();
-        for market in &markets {
-            if let Some(venue) = self.venue(&market.venue_id) {
-                matching::attach_market(&mut legacy, venue.id(), venue.capabilities().framing, market.clone());
-            }
-        }
-        *self.graph.write().await = legacy;
 
         let config = BuildConfig { overrides: self.overrides.read().await.clone(), ..BuildConfig::default() };
         let routable: HashSet<String> =

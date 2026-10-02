@@ -1,10 +1,9 @@
 //! Venue-facing data shapes shared by every `services::<vendor>` integration, plus each vendor's
-//! own wire-format models in `panta`, `jupiter`, `pascal`. Error types live in `crate::errors`,
+//! own wire-format models in `panta`, `jupiter`. Error types live in `crate::errors`,
 //! not here - this module is pure data.
 
 pub mod jupiter;
 pub mod panta;
-pub mod pascal;
 pub mod timestamp;
 
 use rust_decimal::Decimal;
@@ -155,6 +154,13 @@ pub struct VenueCapabilities {
     pub can_execute: bool,
     /// true if this venue lets a caller create new markets (Panta today).
     pub can_create_markets: bool,
+    /// true if this venue can list a wallet's positions (`GET /v1/positions`).
+    pub can_list_positions: bool,
+    /// true if this venue can build a claim for a winning position.
+    pub can_claim: bool,
+    /// true if this venue can build a sell that exits a position before it resolves. Panta cannot:
+    /// its API only trades the primary phase, so a holder waits for resolution and claims.
+    pub can_sell: bool,
 }
 
 /// A venue's own parent event for a market, preserved as the venue reports it.
@@ -353,13 +359,6 @@ impl VenueMarket {
         }
     }
 
-    /// The price for one side, as the venue quoted it in its catalog listing.
-    pub fn price_for(&self, side: &str) -> Option<&str> {
-        match side {
-            "no" | "short" => self.no_price.as_deref(),
-            _ => self.yes_price.as_deref(),
-        }
-    }
 }
 
 /// Optional filters passed to `list_markets` - a venue may ignore any of these.
@@ -484,12 +483,5 @@ mod tests {
         let aliases = CategoryAliases::defaults().with_overrides("stocks=finance, bad-entry ,=x");
         assert_eq!(aliases.canonical("stocks"), Category::from("finance"));
         assert_eq!(aliases.canonical("climate & science"), Category::from("science"));
-    }
-
-    #[test]
-    fn price_for_picks_the_requested_side() {
-        let m = market(NOW + 100, NOW + 500);
-        assert_eq!(m.price_for("yes"), Some("0.5"));
-        assert_eq!(m.price_for("no"), Some("0.5"));
     }
 }

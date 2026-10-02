@@ -2,4 +2,5 @@
 //! plain utility.
 
 pub mod http;
+pub mod solana_tx;
 pub mod time;

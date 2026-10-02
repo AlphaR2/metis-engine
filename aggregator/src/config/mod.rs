@@ -102,15 +102,14 @@ pub struct Config {
     /// Take the client IP from the first `X-Forwarded-For` entry. Only safe behind a proxy that
     /// overwrites that header - otherwise any client can pick its own identity. Default false.
     pub trust_forwarded_for: bool,
+    /// How many proxies in front of this service append to `X-Forwarded-For` (default 1; a CDN in
+    /// front of a load balancer is 2). Only read when `trust_forwarded_for` is set. The client's
+    /// address is that many entries from the right of the header - never the leftmost, which the
+    /// client controls.
+    pub trusted_proxy_hops: usize,
 }
 
 /// The venues wired up when `ENABLED_VENUES` is unset.
-///
-/// Pascal is deliberately absent: its wire format is unverified (its `/markets` envelope is
-/// `{status, data}`, which the current model does not match) and its adapter hardcodes
-/// `dead: false`, so including it by default would mean serving markets we cannot filter for
-/// tradeability. Add it explicitly once its schema has had the same confirmation pass as the
-/// other two.
 fn default_enabled_venues() -> Vec<String> {
     vec!["panta".to_string(), "jupiter".to_string()]
 }
@@ -158,15 +157,19 @@ impl Config {
             trust_forwarded_for: env::var("TRUST_FORWARDED_FOR")
                 .map(|v| v.trim().eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            trusted_proxy_hops: env::var("TRUSTED_PROXY_HOPS")
+                .ok()
+                .and_then(|raw| raw.parse().ok())
+                .filter(|hops| *hops >= 1)
+                .unwrap_or(1),
         }
     }
 
     /// Checks the config is actually usable - a malformed `CORS_ORIGIN` would otherwise only
-    /// surface as a panic deep inside axum's CORS layer construction.
+    /// surface as a panic deep inside axum's CORS layer construction, and a wildcard or a
+    /// trailing slash would validate as a header value and then silently misbehave.
     pub fn validate(&self) -> Result<(), String> {
-        self.cors_origin
-            .parse::<axum::http::HeaderValue>()
-            .map_err(|e| format!("CORS_ORIGIN '{}' is not a valid header value: {e}", self.cors_origin))?;
+        crate::middleware::parse_origins(&self.cors_origin)?;
         Ok(())
     }
 }
@@ -190,6 +193,7 @@ mod tests {
             request_timeout_secs: 45,
             rate_limit_per_minute: 300,
             trust_forwarded_for: false,
+            trusted_proxy_hops: 1,
         }
     }
 
@@ -201,6 +205,18 @@ mod tests {
     #[test]
     fn an_origin_with_invalid_header_bytes_fails_validation() {
         assert!(config_with("http://\ninvalid").validate().is_err());
+    }
+
+    #[test]
+    fn several_origins_validate() {
+        assert!(config_with("https://metis.example, https://staging.metis.example").validate().is_ok());
+    }
+
+    #[test]
+    fn wildcards_paths_and_empty_lists_are_refused() {
+        for bad in ["*", "https://*.example.com", "https://metis.example/", "https://metis.example/app", "metis.example", "", " , "] {
+            assert!(config_with(bad).validate().is_err(), "{bad:?} should be refused");
+        }
     }
 
     #[test]

@@ -18,7 +18,8 @@ the market store after every refresh (`src/engine/`) and swapped in whole.
 | `GET /v1/events/{id}` | The full event: every question as a sentence, every outcome, every venue listing rated best-first with its breakdown |
 | `GET /v1/events/{id}/questions/{qid}` | One question in full |
 | `GET /v1/markets` | Every venue market, flat, each carrying `event_id`, `event_title`, `question_id` and `question_text` |
-| `GET /v1/markets/{venue}/{id}` | One market with its event context |
+| `GET /v1/markets/{venue}/{id}` | One market with its event context, from the last refresh |
+| `GET /v1/markets/{venue}/{id}/live` | The same market read from the venue right now (`held` says whether the catalog also has it; `fetched_at` is when). Costs a venue call, so it is rate-limited like a live quote |
 | `GET /v1/categories` | Categories as the venues report them, with each venue's own names and event/market counts |
 | `GET /v1/venues` | Enabled venues, their capabilities, health and staleness |
 | `POST /v1/route` | The best venue to back one outcome at a size, from live quotes, with fees included |
@@ -51,25 +52,92 @@ the folded event's id still resolves.
 - **Rating.** Only listings of the same outcome are compared: price (40), activity (10) and
   venue reliability (10), renormalised over the components a venue can provide.
 
-## The markets path
+## Positions, claims and sells
 
-`GET /markets` is the primary endpoint. It serves **raw venue markets, untransformed** — what the
-venue reported is what a caller gets, plus a `venue_id` saying where it came from.
+| Endpoint | What it does |
+|---|---|
+| `GET /v1/positions?wallet=` | A wallet's holdings across venues, normalised: side, shares, cost, value, pnl where the venue reports them, `state` (`open`, `claimable`, `claimed`, `lost`, `cancelled`), a `claim_ref` when claimable, and `can_sell`. |
+| `POST /execution/claims` | An unsigned claim transaction. `venue_ref` is the position's `claim_ref`. |
+| `POST /execution/sells` | An unsigned sell (Jupiter). Opens an order that a keeper fills, tracked like a buy. Panta has no sell: its API trades the primary phase only, so a holder waits for resolution and claims. |
 
-```
-GET /markets?category=sports          # required
-             &within_days=7           # default 7; filters on close_time
-             &sort=best_overall       # closing_soonest (default) | best_price
-                                      #   | best_liquidity | best_execution | best_overall
-             &side=yes                # default yes
-             &venue=jupiter           # optional
-             &quote_size=100          # optional: live-quote the top candidates
-             &limit=50&offset=0
-```
+**A venue that could not be read is not a venue where the wallet holds nothing.** Each venue is read
+on its own with its own timeout. A failure goes in `venues_failed` and the list is then incomplete;
+a client must say so and never present it as everything the wallet holds. Only complete results are
+cached (8 seconds); a partial one never is. A wallet with more positions than a venue's page cap
+(Jupiter 1000, Panta about 200) is reported as a failure, not silently truncated. A row that names a
+different owner than the one asked for fails the whole read.
 
-`GET /categories` lists the valid `category` values, since it's a required filter.
+`value_usdc` is the venue's mark where it gives one (Jupiter). Where it does not (Panta), an open
+position is valued from the catalog price and flagged `value_is_estimate: true`: a spot price is not
+what a sale fetches, and the catalog is minutes old.
 
-### Three different times
+**Panta buys and claims** return instructions and a blockhash, not a transaction. The adapter
+compiles them into one unsigned v0 transaction (`src/utils/solana_tx.rs`). It refuses, and builds
+nothing, if an instruction invokes a program outside the allowlist (Panta's program plus system,
+token, associated-token, compute-budget and memo), asks for a signer other than the wallet, uses an
+address lookup table, or would not fit a packet. The encoder is cross-checked byte for byte against
+the official Solana crate in its tests.
+
+**Jupiter transactions are inspected, not just forwarded.** Jupiter returns a finished transaction, so the
+adapter reads it (`utils/solana_tx.rs`, `verify_venue_transaction`) before it leaves this service, for every
+buy, sell and claim. It is refused unless the wallet is the fee payer and the only signer, every program it
+invokes is Jupiter's issuer program (`2sVcg2dBSUzXkmdZ8M5cp1LbnzDrWJmr6hktkHwB8nY3`, from Jupiter's developer
+docs) or one of the common supporting programs, and it contains no top-level token transfer, delegate approval,
+authority change or account reassignment. SOL may move only in rent-sized amounts (at most 5,000,000
+lamports per System instruction), the same bound the web client enforces. A refusal is logged at error level with the reason. If
+Jupiter starts using another program, add it with `JUPITER_EXTRA_PROGRAMS` (comma-separated) rather than
+loosening the check. **This has not yet been run against a live Jupiter order.** Before enabling execution,
+build one with `scripts/dry-run-order.sh` and confirm it passes; the guard fails closed, so a wrong
+assumption shows up as a refused build, not a bad transaction. It cannot prove Jupiter's own program is
+honest: the cost and payout preview stays what the user approves.
+
+**Two different truths.** The chain says whether the money moved; the venue says whether it
+registered the action. A venue-side `failed` on `POST /execution/confirm` can be a registration
+problem while the transaction landed, so a client decides money outcomes from the signature on-chain
+and uses the venue's status for the rest. A transport error or a 5xx on a Panta submit is returned as
+an error, never as `failed`, because it says nothing about the transaction (submit is idempotent on
+`orderId` + signature, so retrying is safe).
+
+## Errors
+
+Every error is `{ "error": "text", "code": "CODE", "retryable": bool, "venue_code": "..."? }`. Route
+on `code`; `error` is for display and its wording may change. Codes are additive and never renamed:
+
+| Code | Meaning | Client action |
+|---|---|---|
+| `INVALID_REQUEST` | The request is malformed or out of range | Fix it |
+| `NOT_FOUND`, `MARKET_NOT_FOUND` | It does not exist | Stop |
+| `UNKNOWN_VENUE` | No such venue is enabled | Stop |
+| `UNSUPPORTED` | The venue does not offer this action | Hide the action |
+| `EXECUTION_DISABLED`, `MARKET_CREATION_DISABLED` | Switched off on this deployment | Show trading as unavailable |
+| `PRICE_MOVED` | Below the caller's `min_shares_out` | Re-quote, ask the user again |
+| `QUOTE_STALE` | The venue's quote expired or its curve moved past the tolerance | Re-quote |
+| `NO_LIQUIDITY` | No depth at this size | Ask for less |
+| `ORDER_MIN_SIZE` | Under the venue's minimum order | Raise the amount |
+| `MARKET_NOT_TRADABLE` | Open but not tradable through the API (Panta past its primary phase) | View only |
+| `NOT_CLAIMABLE` | Nothing to claim | Refresh positions |
+| `TRANSACTION_EXPIRED` | The venue's window closed | Rebuild |
+| `RATE_LIMITED` | Too many requests | Wait `Retry-After` |
+| `VENUE_UNAVAILABLE` | The venue failed | Retry later |
+
+`retryable` is true only where sending the identical request later can succeed. `QUOTE_STALE` and
+`PRICE_MOVED` are not: a blind resend is the wrong response, a re-quote is the right one. When a venue
+names its own failure (`QUOTE_EXPIRED`, `NOT_CLAIMABLE`, `TX_FEE_MISMATCH`), that word is passed
+through verbatim as `venue_code`.
+
+## CORS and rate limits
+
+`CORS_ORIGIN` takes one origin or a comma-separated list, each exactly `scheme://host[:port]`. A
+wildcard, a path or a trailing slash is refused at startup. Methods are `GET`, `POST`, `OPTIONS` only;
+`Retry-After` and `ETag` are exposed so a browser client can read them.
+
+Requests cost tokens from a per-IP bucket: memory reads 1, an action status poll 2, and anything that
+calls a venue (`POST /v1/route`, `/live`, `POST /execution/*`, `/v1/positions`) 10. Behind a proxy set
+`TRUST_FORWARDED_FOR=true` and `TRUSTED_PROXY_HOPS` to the number of proxies that append to
+`X-Forwarded-For`. The client address is that many entries from the **right**; the leftmost entry is
+client-supplied and is never used.
+
+## Market times
 
 Venues report three distinct timestamps and conflating them produces wrong answers, so the model
 keeps them separate:
@@ -80,63 +148,46 @@ keeps them separate:
 | `close_time` | **stops accepting bets** | `endTime` | `closeTime` |
 | `resolution_time` | outcome settled | `resolutionTime` | `resolveAt` |
 
-`within_days` filters on **`close_time`** — "stops taking bets within N days". Close and resolution
+`within_days` filters on **`close_time`** - "stops taking bets within N days". Close and resolution
 are genuinely different moments: on a 50-market Panta sample they differed on 38 of them, by
 anything from hours to five days. A market whose betting has closed but which hasn't settled yet is
 not tradeable, so it is excluded.
 
 A `close_time` of `0` means the venue reports no cutoff at all (Jupiter does this for open-ended
-markets — "closes after a winner is declared", 28 of 1063 on a live sports page). Those are
+markets - "closes after a winner is declared", 28 of 1063 on a live sports page). Those are
 excluded from a bounded window rather than padding results with markets we can't prove belong
 there.
 
-### Ranking
-
-Two tiers, so a list view costs nothing but a ranked trade decision is still accurate:
-
-- **Catalog (default)** — ranks on what the venue's listing already gave us (price, reported
-  volume). Pure in-memory, no network calls. `services/maths/markets.rs`.
-- **Live quotes (`quote_size=`)** — re-prices the shortlist the catalog sort produced by quoting
-  each market for real, concurrently, then ranks with the *same* scorers `/find-best-market` uses
-  (`services/maths/routing.rs`). The response says which was used via `scored_with`.
-
-Markets missing the field a sort ranks on always sort **last**, never as zero — an unpriced market
-is not free, and a market with no reported volume is not empty.
-
-Live-quote rankings use the **all-in** price per contract (fill price plus fee per contract). Panta
-reports its fee in the quote; Jupiter's fee is only known once an order is built, so its quotes
-carry a fee of 0 for now.
-
-With `quote_size`, every market on the page is quoted, so the page is capped at 20. The response's
-`limit` is the size actually applied — page on that. Quotes are cached for 5 seconds per
-`(venue, market, side, size)`.
-
-## The events path
-
-`/events` and the canonical event graph (`services/matching`, `repositories/graph_repository`) are
-retained and still work. They group markets across venues by title similarity into real-world
-events, which pays off only once several venues quote the same event — not the situation today, so
-it is no longer the primary path.
+The earlier `/markets`, `/categories`, `/events`, `/events/{id}/markets` and `/find-best-market`
+routes, and the title-similarity graph behind them, were removed. `/v1` replaces each of them;
+`POST /v1/route` replaces `/find-best-market` and takes a `question_id` rather than an `event_id`.
 
 ## Venues
 
-| | Jupiter | Panta | Pascal |
-|---|---|---|---|
-| Status | **carries the catalog** | wired, near-empty | not enabled by default |
-| Categories | 11 filter names in the adapter (no categories endpoint) | `GET /categories/` (8) plus what markets report (11 seen) | — |
-| Sort | `volume`, `volume24hr`, `beginAt` | *ignored* | — |
-| Pagination | offset, works | **cursor never advances** | none |
-| Depth signal | `pricing.volume` | `volumeUsdc` | none |
+| | Jupiter | Panta |
+|---|---|---|
+| Status | carries most of the catalog | markets found on-chain, described by the API |
+| Categories | 11 filter names in the adapter (no categories endpoint) | `GET /categories/` (8) plus what markets report (11 seen) |
+| Sort | `volume`, `volume24hr`, `beginAt` | *ignored* |
+| Pagination | offset, works | cursor, advances |
+| Depth signal | `pricing.volume` | `volumeUsdc` |
 
 Notes from verifying these live:
 
-- **Panta's list rows can't be trusted alone.** They carry no text (`title` blank on 84 of 84
-  rows) and their state lags: rows listed `primary`/`open` are often `cancelled` or `resolved` on
-  the market's own record. The adapter reconciles every open-looking row with
-  `GET /markets/{id}/`, adopting its question, rules, sources and state. At the Phase 0 capture
-  that left **no** bettable Panta market. Its `nextCursor` is also a constant (six requests
-  returned 300 rows holding 50 distinct markets); the refresh detects a non-advancing cursor and
-  stops.
+- **Panta's list is a registry, not the whole chain.** As of 2026-09-24 mainnet held 191 `Event`
+  accounts and the API reached 99, including 5 of the 8 live ones. So discovery reads the chain
+  (`getProgramAccounts` on the Panta program, `PANTA_RPC_URL`; `PANTA_DISCOVERY=api` opts back
+  into the API list): the chain decides which markets exist and their state, and the API's record
+  by id supplies category, images and text. For a market outside the registry the API returns a
+  placeholder (blank text, a stale `primary`/`open`), so the chain's question, rules, state and
+  last price win.
+- **Panta's list rows can't be trusted alone.** They carry no text and their state lags: rows
+  listed `primary`/`open` are often `cancelled` or `resolved` on the market's own record. The
+  adapter reconciles every open-looking row with `GET /markets/{id}/`, adopting its question,
+  rules, sources and state.
+- **Panta's cursor pagination works** (fixed venue-side 2026-09-28; before that `nextCursor` never
+  advanced and the list was stuck on page 1). The refresh dedupes by market id and still stops on
+  a non-advancing cursor, so it was safe before and after.
 - **Both venues sometimes send timestamps as ISO-8601 strings** where they document integers.
   `models/venue/timestamp.rs` accepts either; a Jupiter category was silently failing to parse
   before that was handled.
@@ -184,8 +235,9 @@ so everything a venue sends — including fields not yet modelled, in `extra` �
 One blob per venue rather than a row per market: nothing queries markets in SQL, and the catalog
 only compresses well as a whole (~67 MB of rows vs a few MB).
 
-`GET /markets` reports `last_refreshed_at` so a UI can show data age and tell an empty catalog from
-an unprimed one, and `stale_venues` naming any venue whose markets are a last good copy.
+`GET /v1/venues` reports each venue's market count and whether its catalog is a last good copy (`stale`),
+and `GET /ready` answers 503 until the first catalog is held, so an empty catalog and an unprimed one
+are told apart.
 
 ## Persistence
 
@@ -211,12 +263,43 @@ returns the venue's own status code.
 ## Protecting the public routes
 
 - **Rate limit:** each client IP gets `RATE_LIMIT_PER_MINUTE` tokens a minute (default 300, `0`
-  disables). A request that takes live quotes costs 10. Over the limit is a `429` with
-  `Retry-After`. Behind a proxy that overwrites `X-Forwarded-For`, set `TRUST_FORWARDED_FOR=true`.
+  disables). A request that takes live quotes (`POST /v1/route`) or reads a market live costs 10. Over the limit is a `429` with
+  `Retry-After`. Behind a proxy that overwrites `X-Forwarded-For`, set `TRUST_FORWARDED_FOR=true`; behind one
+  that does not, every client shares the proxy's address and one bucket.
+- **Redaction:** venue and RPC error text is scrubbed of URLs (`errors/adapter_error.rs`) before it
+  reaches logs, `/venues/health` or a response, because a private RPC URL carries its key.
+- **Slippage floor:** a buy may carry `min_shares_out`. The build is refused when the venue's
+  build-time preview is below it, or gives no share count to compare. It is a build-time check,
+  not an on-chain bound.
 - **Timeout:** any request running longer than `REQUEST_TIMEOUT_SECS` (default 45) gets a `408`.
 - **Venue health:** a venue's `429` is backpressure, not an outage — it never counts toward the
   failure streak that takes a venue out of routing.
 - **Shutdown:** `SIGTERM`/Ctrl-C drains in-flight requests before exit.
+
+## Deploying
+
+```bash
+docker build -t metis-api .          # from the workspace root (engine/)
+sqlx migrate run --source aggregator/migrations   # deploy step, never at startup
+docker run --env-file aggregator/.env -p 8080:8080 metis-api
+```
+
+- **Configuration** is environment only; the image bakes in no `.env`. `.env.example` lists every
+  variable. `ADMIN_TOKEN` unset disables the operator routes, and `EXECUTION_ENABLED` /
+  `MARKET_CREATION_ENABLED` are off unless exactly `true`.
+- **Region:** Jupiter blocks US and South Korea IPs, so run somewhere else.
+- **Postgres** is optional (unset means in-memory, nothing survives a restart). Use the direct
+  connection, not a transaction-mode pooler. Size `DATABASE_POOL_SIZE` so instances × pool stays
+  under the database's `max_connections`.
+- **Panta discovery** needs a private `PANTA_RPC_URL`; the public RPC rate-limits
+  `getProgramAccounts`.
+- **Probes:** `GET /health` is liveness and is always 200 (it reports database state in the body but never fails
+  on it: every read is served from memory, so a database outage should not restart the process and drop
+  the catalog). `GET /ready` is readiness: 503 until a catalog is held. Route traffic on `/ready`. `SIGTERM`
+  drains in-flight requests. Logs are JSON
+  (`LOG_FORMAT=json`, the image default).
+- One instance is assumed: the refresh lock and rate-limit buckets are in-process. Running several
+  works, but each refreshes and limits on its own.
 
 ## Metrics
 
@@ -243,9 +326,9 @@ cargo clippy -p metis-aggregator --all-targets
 api/v1/         axum routes, one module per feature, mirroring the OpenAPI tags
 services/       business logic
   <vendor>/     service.rs = trading decisions, client.rs = raw HTTP only
-  maths/        pure numeric engines, no I/O (markets, routing, orderbook, matching)
+  maths/        pure numeric engines, no I/O (routing, orderbook)
 engine/         the events engine: text, dictionary, extract, build, matching, rating, graph
-repositories/   storage - market store (+ its Postgres mirror), overrides, legacy graph, health, quote cache
+repositories/   storage - market store (+ its Postgres snapshot), overrides, health, quote and positions caches
 models/         data shapes only, no behavior; venue wire formats under models/venue/
 errors/         AdapterError, RoutingError, and the HTTP-facing ApiError they map onto
 ```
