@@ -97,34 +97,19 @@ pub fn venue_url_dir(base_url: &str, segments: &[&str]) -> Result<reqwest::Url, 
     Ok(url)
 }
 
-/// Splits a caller-supplied relative path into segments for `venue_url`, keeping a trailing
-/// slash (Panta's routes need one) as a final empty segment.
+/// A header map carrying `name: key`, or an empty one when the key is blank.
 ///
-/// Rejects dot segments and backslashes rather than normalising them: nothing legitimate needs
-/// them, and silently resolving `a/../b` is exactly how a traversal gets through.
-pub fn split_relative_path(path: &str) -> Result<(Vec<&str>, bool), crate::errors::AdapterError> {
-    use crate::errors::AdapterError;
-
-    let trimmed = path.trim_start_matches('/');
-    let trailing_slash = trimmed.ends_with('/');
-    let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
-    if segments.is_empty() {
-        return Err(AdapterError::InvalidRequest("empty path".to_string()));
+/// Jupiter answers 200 to a request with no key header at all but 401 to one with an empty or wrong
+/// key, so sending `x-api-key: ` for an unset key turned a working read into an empty catalog.
+pub fn api_key_headers(name: &'static str, key: &str) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let key = key.trim();
+    if !key.is_empty() {
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(key) {
+            headers.insert(reqwest::header::HeaderName::from_static(name), value);
+        }
     }
-    if segments.iter().any(|s| *s == "." || *s == ".." || s.contains('\\')) {
-        return Err(AdapterError::InvalidRequest(format!("path '{path}' contains a dot segment or backslash")));
-    }
-    Ok((segments, trailing_slash))
-}
-
-/// `venue_url` for a caller-supplied relative path, preserving a trailing slash.
-pub fn venue_url_for_path(base_url: &str, path: &str) -> Result<reqwest::Url, crate::errors::AdapterError> {
-    let (segments, trailing_slash) = split_relative_path(path)?;
-    let mut url = venue_url(base_url, &segments)?;
-    if trailing_slash {
-        url.path_segments_mut().expect("already has a path").push("");
-    }
-    Ok(url)
+    headers
 }
 
 #[cfg(test)]
@@ -163,15 +148,11 @@ mod tests {
         assert_eq!(venue_url("https://x.io/api/v1/", &["markets"]).unwrap().as_str(), "https://x.io/api/v1/markets");
     }
 
+
     #[test]
-    fn relative_paths_reject_traversal_and_keep_trailing_slashes() {
-        assert!(venue_url_for_path(BASE, "../swap/v1/quote").is_err());
-        assert!(venue_url_for_path(BASE, "events/../../swap").is_err());
-        assert!(venue_url_for_path(BASE, "a\\..\\b").is_err());
-        assert!(venue_url_for_path(BASE, "").is_err());
-        assert_eq!(
-            venue_url_for_path("https://live-api.panta.market/api/v1", "markets/").unwrap().as_str(),
-            "https://live-api.panta.market/api/v1/markets/"
-        );
+    fn a_blank_api_key_sends_no_header_at_all() {
+        assert!(api_key_headers("x-api-key", "").is_empty());
+        assert!(api_key_headers("x-api-key", "   ").is_empty());
+        assert_eq!(api_key_headers("x-api-key", " abc ").get("x-api-key").unwrap(), "abc");
     }
 }

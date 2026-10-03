@@ -3,5 +3,4 @@ pub mod discovery;
 pub mod execution;
 pub mod meta;
 pub mod positions;
-pub mod raw;
 pub mod route;

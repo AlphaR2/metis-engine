@@ -8,6 +8,10 @@
 //! Rules, not a model: every title maps to the same headline on every build. A title no rule fits
 //! keeps its own words, minus the question mark.
 
+// The series-title helpers below are not used by the subject-based events (they title clusters from
+// shared words instead); `headline` is. Kept for a venue event's own title.
+#![allow(dead_code)]
+
 use std::sync::LazyLock;
 
 use regex::Regex;

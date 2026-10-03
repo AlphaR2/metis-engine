@@ -12,7 +12,6 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use super::adapter_error::AdapterError;
-use super::routing_error::RoutingError;
 
 /// Stable, client-routable reason for a failure. Additive only: a code is never renamed or
 /// reused, because clients switch on these.
@@ -80,6 +79,7 @@ pub enum ApiError {
     NotFound(String),
     BadRequest(String),
     /// A venue/upstream call failed.
+    #[allow(dead_code)]
     Upstream(String),
     /// A failure with a specific code. Prefer this wherever a client would want to act on the
     /// reason rather than just display it.
@@ -144,15 +144,6 @@ impl IntoResponse for ApiError {
         };
         let body = ErrorBody { error: message, code, retryable: code.retryable(), venue_code };
         (status, Json(body)).into_response()
-    }
-}
-
-impl From<RoutingError> for ApiError {
-    fn from(err: RoutingError) -> Self {
-        match err {
-            RoutingError::NoVenuesForOutcome(_) => ApiError::NotFound(err.to_string()),
-            RoutingError::NoQuotesAvailable => ApiError::Upstream(err.to_string()),
-        }
     }
 }
 

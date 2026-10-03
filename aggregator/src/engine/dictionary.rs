@@ -14,6 +14,7 @@ use super::text::{fold, slug};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum EntityKind {
     Asset,
     Commodity,

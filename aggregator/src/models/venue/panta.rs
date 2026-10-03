@@ -220,6 +220,7 @@ pub struct PantaQuoteResponse {
     #[serde(rename = "feeUsdc")]
     pub fee_usdc: String,
     #[serde(rename = "expiresAt")]
+    #[allow(dead_code)]
     pub expires_at: String,
 }
 

@@ -60,6 +60,7 @@ pub enum AdapterError {
     /// outcome, not an outage: it must never count against `HealthRegistry`, or a run of thin
     /// markets takes a perfectly healthy venue out of routing entirely.
     #[error("no liquidity for {venue_market_id} side {side}")]
+    #[allow(dead_code)]
     NoLiquidity { venue_market_id: String, side: String },
     /// The amount is under the venue's minimum order. Caught before any venue call, so the
     /// caller is told plainly instead of being charged for a build that could never work.

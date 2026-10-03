@@ -113,13 +113,7 @@ fn build_adapter(config: &VenueConfig) -> Option<Arc<dyn VenueAdapter>> {
                 chain,
             )))
         }
-        "jupiter" => {
-            let extra = config.option("EXTRA_PROGRAMS").unwrap_or_default();
-            Some(Arc::new(
-                JupiterAdapter::new(base_url("https://api.jup.ag/prediction/v1"), config.api_key.clone())
-                    .with_extra_programs(extra.split(',').map(str::to_string)),
-            ))
-        }
+        "jupiter" => Some(Arc::new(JupiterAdapter::new(base_url("https://api.jup.ag/prediction/v1"), config.api_key.clone()))),
         _ => None,
     }
 }

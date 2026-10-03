@@ -2,4 +2,3 @@
 //! `routing` (and any future vendor needing book-walking) call into.
 
 pub mod orderbook;
-pub mod routing;

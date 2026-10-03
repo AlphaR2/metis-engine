@@ -1,34 +1,15 @@
-//! The listing rating: which venue is the better place to back one outcome.
+//! Our ratings: how good an event is to look at, and which market inside it to look at first.
 //!
-//! Only listings of the **same outcome** are compared - never unrelated markets (audit A4). Each
-//! listing gets a 0-100 score from the components its venue can provide, weighted by config and
-//! returned with its breakdown so the order is explainable. A component a venue can't provide is
-//! left out and the remaining weights renormalised, so a venue isn't penalised for its API's shape.
-//!
-//! Catalog components (every refresh): price, activity, venue reliability. Live components
-//! (fillability, depth at a size) are added when a caller asks with `quote_size`.
+//! Both are 0-100 with the breakdown returned, so the order is explainable. A component the data
+//! can't provide is left out and the remaining weights renormalised, so a market isn't penalised
+//! for what its venue doesn't report.
 
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::Serialize;
 use utoipa::ToSchema;
 
-use super::graph::Listing;
-
-#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
-pub struct RatingWeights {
-    pub price: f64,
-    pub activity: f64,
-    pub reliability: f64,
-}
-
-impl Default for RatingWeights {
-    /// The plan's MVP weights (price 40, activity 10, reliability 10) for the components the
-    /// catalog has, renormalised when a component is missing.
-    fn default() -> Self {
-        Self { price: 0.40, activity: 0.10, reliability: 0.10 }
-    }
-}
+use crate::models::venue::VenueMarket;
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Rating {
@@ -46,85 +27,105 @@ pub struct RatingComponent {
     pub weight: f64,
 }
 
-/// Rates `listings` (all backing one outcome) in place and sorts them best first.
-/// `routable` answers whether a venue is currently healthy; a display-only listing scores as unroutable.
-pub fn rate_outcome(listings: &mut [Listing], weights: &RatingWeights, routable: impl Fn(&str) -> bool) {
-    let prices: Vec<f64> = listings.iter().filter_map(|l| l.price.and_then(|p| p.to_f64())).collect();
-    let best_price = prices.iter().copied().fold(f64::INFINITY, f64::min);
-    let volumes: Vec<f64> = listings.iter().filter_map(|l| l.volume_usdc.and_then(|v| v.to_f64())).collect();
-    let max_log_volume = volumes.iter().map(|v| (1.0 + v.max(0.0)).ln()).fold(0.0, f64::max);
-
-    for listing in listings.iter_mut() {
-        let mut parts: Vec<(&'static str, f64, f64)> = Vec::new();
-        if let Some(price) = listing.price.and_then(|p| p.to_f64()) {
-            // Each cent above the best price for this outcome costs 5 points.
-            parts.push(("price", (100.0 - (price - best_price) * 500.0).clamp(0.0, 100.0), weights.price));
-        }
-        if let Some(volume) = listing.volume_usdc.and_then(|v| v.to_f64())
-            && max_log_volume > 0.0
-        {
-            parts.push(("activity", 100.0 * (1.0 + volume.max(0.0)).ln() / max_log_volume, weights.activity));
-        }
-        parts.push(("reliability", if listing.tradable && routable(&listing.venue_id) { 100.0 } else { 0.0 }, weights.reliability));
-
-        let total_weight: f64 = parts.iter().map(|(_, _, w)| w).sum();
-        let score = if total_weight > 0.0 { parts.iter().map(|(_, s, w)| s * w).sum::<f64>() / total_weight } else { 0.0 };
-        listing.rating = Some(Rating {
-            score: score.round() as u8,
-            breakdown: parts
-                .into_iter()
-                .map(|(name, s, w)| RatingComponent { name, score: s.round() as u8, weight: if total_weight > 0.0 { w / total_weight } else { 0.0 } })
-                .collect(),
-        });
+/// Combines `(name, 0-100 score, weight)` parts into a rating, renormalising the weights.
+fn combine(parts: Vec<(&'static str, f64, f64)>) -> Rating {
+    let total: f64 = parts.iter().map(|(_, _, w)| w).sum();
+    let score = if total > 0.0 { parts.iter().map(|(_, s, w)| s * w).sum::<f64>() / total } else { 0.0 };
+    Rating {
+        score: score.round().clamp(0.0, 100.0) as u8,
+        breakdown: parts
+            .into_iter()
+            .map(|(name, s, w)| RatingComponent { name, score: s.round().clamp(0.0, 100.0) as u8, weight: if total > 0.0 { w / total } else { 0.0 } })
+            .collect(),
     }
-    listings.sort_by(|a, b| {
-        let score = |l: &Listing| l.rating.as_ref().map_or(0, |r| r.score);
-        score(b).cmp(&score(a)).then_with(|| a.price.unwrap_or(Decimal::ONE).cmp(&b.price.unwrap_or(Decimal::ONE)))
-    });
+}
+
+fn log_share(value: Decimal, max: Decimal) -> f64 {
+    let (v, m) = (value.to_f64().unwrap_or(0.0).max(0.0), max.to_f64().unwrap_or(0.0).max(0.0));
+    if m <= 0.0 { 0.0 } else { 100.0 * (1.0 + v).ln() / (1.0 + m).ln() }
+}
+
+/// A market's volume as the venue reported it (`liquidity` carries the venue's volume figure).
+pub fn volume_of(market: &VenueMarket) -> Decimal {
+    market.liquidity.unwrap_or(Decimal::ZERO)
+}
+
+/// Rates one market among its event's markets: how much is traded on it (`activity`), how tight its
+/// two prices are (`quality`: a YES and NO that sum to far more than 1 is a wide spread), and
+/// whether it can be traded at all through a healthy venue (`reliability`).
+pub fn rate_market(market: &VenueMarket, max_volume_in_event: Decimal, venue_routable: bool) -> Rating {
+    let mut parts: Vec<(&'static str, f64, f64)> = Vec::new();
+    if max_volume_in_event > Decimal::ZERO {
+        parts.push(("activity", log_share(volume_of(market), max_volume_in_event), 0.5));
+    }
+    let yes = market.yes_price.as_deref().and_then(|p| p.parse::<f64>().ok());
+    let no = market.no_price.as_deref().and_then(|p| p.parse::<f64>().ok());
+    if let (Some(yes), Some(no)) = (yes, no) {
+        // Each cent the two sides overshoot 1.00 by costs 10 points of quality.
+        parts.push(("quality", (100.0 - ((yes + no) - 1.0).abs() * 1000.0).clamp(0.0, 100.0), 0.3));
+    }
+    parts.push(("reliability", if !market.display_only && venue_routable { 100.0 } else { 0.0 }, 0.2));
+    combine(parts)
+}
+
+/// Rates an event: how much is traded across it (`activity`), how many venues list it (`coverage`:
+/// a second venue is worth a comparison, which is what an aggregator adds), and how many markets
+/// it holds (`depth`).
+pub fn rate_event(volume: Decimal, max_volume: Decimal, venue_count: usize, market_count: usize) -> Rating {
+    let coverage = match venue_count {
+        0 => 0.0,
+        1 => 40.0,
+        _ => 100.0,
+    };
+    let depth = (100.0 * (market_count as f64).ln_1p() / 10f64.ln_1p()).clamp(0.0, 100.0);
+    combine(vec![("activity", log_share(volume, max_volume), 0.5), ("coverage", coverage, 0.3), ("depth", depth, 0.2)])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn listing(venue: &str, price: &str, volume: Option<&str>) -> Listing {
-        Listing {
-            venue_id: venue.into(),
-            venue_market_id: format!("{venue}-m"),
-            venue_event_id: None,
-            side: "yes".into(),
-            price: Some(price.parse().unwrap()),
-            volume_usdc: volume.map(|v| v.parse().unwrap()),
-            close_time: 0,
-            tradable: true,
-            rules: None,
-            rating: None,
+    fn market(yes: &str, no: &str, volume: Option<u32>) -> VenueMarket {
+        VenueMarket {
+            yes_price: Some(yes.into()),
+            no_price: Some(no.into()),
+            liquidity: volume.map(Decimal::from),
+            ..Default::default()
         }
     }
 
     #[test]
-    fn the_cheaper_listing_for_the_same_outcome_rates_higher() {
-        let mut listings = vec![listing("a", "0.60", Some("1000")), listing("b", "0.55", Some("1000"))];
-        rate_outcome(&mut listings, &RatingWeights::default(), |_| true);
-        assert_eq!(listings[0].venue_id, "b");
-        assert!(listings[0].rating.as_ref().unwrap().score > listings[1].rating.as_ref().unwrap().score);
+    fn a_busier_market_with_tight_prices_rates_higher() {
+        let max = Decimal::from(1000);
+        let busy = rate_market(&market("0.50", "0.50", Some(1000)), max, true);
+        let quiet = rate_market(&market("0.50", "0.50", Some(10)), max, true);
+        let wide = rate_market(&market("0.60", "0.60", Some(1000)), max, true);
+        assert!(busy.score > quiet.score);
+        assert!(busy.score > wide.score);
     }
 
     #[test]
-    fn an_unhealthy_venue_is_marked_down() {
-        let mut listings = vec![listing("down", "0.50", None), listing("up", "0.51", None)];
-        rate_outcome(&mut listings, &RatingWeights::default(), |v| v == "up");
-        assert_eq!(listings[0].venue_id, "up");
+    fn an_untradable_or_unhealthy_market_is_marked_down() {
+        let max = Decimal::from(1000);
+        let up = rate_market(&market("0.5", "0.5", Some(1000)), max, true);
+        let down = rate_market(&market("0.5", "0.5", Some(1000)), max, false);
+        assert!(up.score > down.score);
     }
 
     #[test]
     fn a_missing_component_is_left_out_not_scored_zero() {
-        let mut listings = vec![listing("a", "0.50", None)];
-        rate_outcome(&mut listings, &RatingWeights::default(), |_| true);
-        let rating = listings[0].rating.as_ref().unwrap();
+        let rating = rate_market(&VenueMarket::default(), Decimal::ZERO, true);
+        assert!(rating.breakdown.iter().all(|c| c.name != "activity" && c.name != "quality"));
         assert_eq!(rating.score, 100);
-        assert!(rating.breakdown.iter().all(|c| c.name != "activity"));
         let weights: f64 = rating.breakdown.iter().map(|c| c.weight).sum();
         assert!((weights - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_event_on_two_venues_outrates_the_same_event_on_one() {
+        let max = Decimal::from(1000);
+        let both = rate_event(Decimal::from(500), max, 2, 3);
+        let one = rate_event(Decimal::from(500), max, 1, 3);
+        assert!(both.score > one.score);
     }
 }

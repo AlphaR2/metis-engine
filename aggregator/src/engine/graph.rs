@@ -1,7 +1,12 @@
-//! The canonical event graph the `/v1` API serves: Event → Question → Outcome → Listing.
+//! The event graph the `/v1` API serves: Event → Markets.
 //!
-//! Built fresh from the market store on every refresh (`build::build_graph`) and swapped in whole,
-//! so it can never accumulate dead markets (audit A7) and reads never wait on a rebuild.
+//! An **event** is our own aggregation of venue markets about one real-world subject. It carries our
+//! metadata (title, image, category, dates, volume, rating) and *why* its markets were grouped. Its
+//! **markets** are the venues' own markets, exactly as they were sent, each annotated (never
+//! rewritten) with our rating and the identical questions other venues list.
+//!
+//! Built fresh from the market store on every refresh (`events::build_events`) and swapped in whole,
+//! so it can never accumulate dead markets and reads never wait on a rebuild.
 
 use std::collections::HashMap;
 
@@ -10,115 +15,63 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use super::dictionary::EntityRef;
+use super::rating::Rating;
+use crate::models::venue::VenueMarket;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EventStatus {
     /// Not started; bets open.
     Upcoming,
-    /// Started (kickoff passed) and still taking bets.
+    /// Started and still taking bets.
     Live,
     /// No longer taking bets.
     Closed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum QuestionKind {
-    /// Who wins a matchup; outcomes are the sides.
-    Winner,
-    /// One of several mutually exclusive options (candidates, ranges, counts).
-    Multi,
-    /// A price or level threshold, yes or no.
-    Threshold,
-    /// Will something happen by a date, yes or no.
-    Deadline,
-    /// Any other yes/no question.
-    Binary,
-}
-
-/// One market on one venue, as a way to back an outcome.
-#[derive(Debug, Clone, Serialize, ToSchema)]
-pub struct Listing {
+/// A pointer to one venue market.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct MarketRef {
     pub venue_id: String,
     pub venue_market_id: String,
-    pub venue_event_id: Option<String>,
-    /// The venue-native side that backs this outcome (`yes` / `no`).
-    pub side: String,
-    /// Catalog price for that side, 0-1.
-    #[schema(value_type = Option<String>)]
-    pub price: Option<Decimal>,
-    #[schema(value_type = Option<String>)]
-    pub volume_usdc: Option<Decimal>,
-    pub close_time: i64,
-    /// Whether a trade can be routed here. `false` for a listing shown for its price only (a Panta
-    /// market past its primary phase); routes and rating skip it.
-    pub tradable: bool,
-    /// The venue's resolution terms, verbatim.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rules: Option<String>,
-    /// 0-100 within this outcome; see `rating`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rating: Option<super::rating::Rating>,
 }
 
+/// One venue market inside an event: the market untouched, plus our annotations.
 #[derive(Debug, Clone, Serialize, ToSchema)]
-pub struct OutcomeNode {
-    pub id: String,
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entity: Option<EntityRef>,
-    /// Every venue listing backing this outcome, best-rated first.
-    pub listings: Vec<Listing>,
+pub struct MarketNode {
+    /// The venue's market exactly as it was sent: title, outcomes, prices, volume, rules, image.
+    pub market: VenueMarket,
+    /// Our 0-100 rating among this event's markets, with its breakdown.
+    pub rating: Rating,
+    /// The identical question on another venue, so the two can be read side by side.
+    pub same_question_as: Vec<MarketRef>,
 }
 
-impl OutcomeNode {
-    /// The best catalog price across listings.
-    pub fn best_price(&self) -> Option<Decimal> {
-        self.listings.iter().filter_map(|l| l.price).min()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, ToSchema)]
-pub struct QuestionNode {
-    /// Stable id (`q_…`) derived from the venue markets it was first built from.
-    pub id: String,
-    pub kind: QuestionKind,
-    /// Short label, e.g. "↑ 90,000" or "Who wins?".
-    pub label: String,
-    /// The question as a full sentence.
-    pub text: String,
-    /// The threshold or line, when the question has one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<String>)]
-    pub line: Option<Decimal>,
-    pub close_time: i64,
-    pub outcomes: Vec<OutcomeNode>,
-    /// True when the listings merged here come from venues whose rules differ; their prices are
-    /// then shown side by side, never ranked as interchangeable.
-    pub rules_differ: bool,
-}
-
-impl QuestionNode {
-    pub fn venue_ids(&self) -> Vec<&str> {
-        let mut ids: Vec<&str> =
-            self.outcomes.iter().flat_map(|o| o.listings.iter().map(|l| l.venue_id.as_str())).collect();
-        ids.sort();
-        ids.dedup();
-        ids
-    }
-
+impl MarketNode {
     pub fn volume(&self) -> Decimal {
-        self.outcomes.iter().flat_map(|o| o.listings.iter()).filter_map(|l| l.volume_usdc).sum()
+        self.market.liquidity.unwrap_or(Decimal::ZERO)
     }
 }
 
-/// Where an event came from on one venue.
+/// Why an event's markets were grouped together.
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+pub struct Grouping {
+    /// `venue_event` (the venue grouped them), `match` (the same two sides on the same day), `price`
+    /// (one asset in one month), `terms` (the same distinctive words), `ai` (a model decided) or
+    /// `single` (nothing else matched, so the market is its own event).
+    pub reason: String,
+    /// A sentence saying what they share.
+    pub detail: String,
+    /// 0-1.
+    pub confidence: f32,
+}
+
+/// Where an event's markets came from on one venue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct SourceRef {
     pub venue_id: String,
     pub venue_event_id: String,
-    /// The venue's own title for the event, verbatim - often a question.
+    /// The venue's own title for the event, verbatim.
     pub title: String,
     /// The venue's own category name, verbatim.
     pub venue_category: String,
@@ -126,17 +79,13 @@ pub struct SourceRef {
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct EventNode {
-    /// Stable id (`evt_…`) derived from the venue event it was built from, or from what its
-    /// related events share when several were grouped; a merged-away event's id still resolves
-    /// (see `EventGraph::event`).
+    /// Stable id (`evt_…`) while the event's markets are stable.
     pub id: String,
     pub slug: String,
+    /// A headline naming the subject, never a question.
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
-    /// What the event covers, in one line: category, how many questions on which venues, and when
-    /// they close - "Politics · 3 questions on Jupiter · closes Sep 30, 2026 – Dec 31, 2027".
-    pub context: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Shared category name (see `CategoryAliases`).
@@ -148,22 +97,26 @@ pub struct EventNode {
     pub domain: String,
     pub tags: Vec<String>,
     pub entities: Vec<EntityRef>,
+    /// The best member's image. Absent when no venue sent one; clients draw a category fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
     /// When the real-world event starts, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_time: Option<i64>,
-    /// Earliest betting close across its questions.
+    /// Earliest betting close across its markets.
     pub close_time: i64,
     pub status: EventStatus,
     #[schema(value_type = String)]
     pub volume_usdc: Decimal,
+    pub venues: Vec<String>,
     pub venue_count: usize,
-    pub question_count: usize,
+    pub market_count: usize,
+    /// Our 0-100 rating of the event itself: activity, venue coverage and depth.
+    pub rating: Rating,
+    pub grouping: Grouping,
     pub sources: Vec<SourceRef>,
-    /// 0-1: how much of the metadata was extracted with confidence.
-    pub metadata_confidence: f32,
-    pub questions: Vec<QuestionNode>,
+    /// The raw venue markets, best-rated first.
+    pub markets: Vec<MarketNode>,
 }
 
 /// The whole graph, with lookups.
@@ -171,42 +124,31 @@ pub struct EventNode {
 pub struct EventGraph {
     pub events: Vec<EventNode>,
     by_id: HashMap<String, usize>,
-    /// Old event ids that now resolve to a merged event.
-    aliases: HashMap<String, String>,
-    /// (venue_id, venue_market_id) → (event index, question index).
-    listings: HashMap<(String, String), (usize, usize)>,
+    /// (venue_id, venue_market_id) → (event index, market index).
+    markets: HashMap<(String, String), (usize, usize)>,
     pub built_at: i64,
 }
 
 impl EventGraph {
-    pub fn new(events: Vec<EventNode>, aliases: HashMap<String, String>, built_at: i64) -> Self {
+    pub fn new(events: Vec<EventNode>, built_at: i64) -> Self {
         let by_id = events.iter().enumerate().map(|(i, e)| (e.id.clone(), i)).collect();
-        let mut listings = HashMap::new();
+        let mut markets = HashMap::new();
         for (e, event) in events.iter().enumerate() {
-            for (q, question) in event.questions.iter().enumerate() {
-                for listing in question.outcomes.iter().flat_map(|o| &o.listings) {
-                    listings.entry((listing.venue_id.clone(), listing.venue_market_id.clone())).or_insert((e, q));
-                }
+            for (m, node) in event.markets.iter().enumerate() {
+                markets.entry((node.market.venue_id.clone(), node.market.venue_market_id.clone())).or_insert((e, m));
             }
         }
-        Self { events, by_id, aliases, listings, built_at }
+        Self { events, by_id, markets, built_at }
     }
 
-    /// The event with this id, following an alias left by a merge.
     pub fn event(&self, id: &str) -> Option<&EventNode> {
-        let id = self.aliases.get(id).map_or(id, String::as_str);
         self.by_id.get(id).map(|i| &self.events[*i])
     }
 
-    /// The (event, question) holding the listing for this venue market.
-    pub fn find_listing(&self, venue_id: &str, venue_market_id: &str) -> Option<(&EventNode, &QuestionNode)> {
-        let (e, q) = *self.listings.get(&(venue_id.to_string(), venue_market_id.to_string()))?;
-        Some((&self.events[e], &self.events[e].questions[q]))
-    }
-
-    /// The question with this id and the event holding it.
-    pub fn question(&self, question_id: &str) -> Option<(&EventNode, &QuestionNode)> {
-        self.events.iter().find_map(|e| e.questions.iter().find(|q| q.id == question_id).map(|q| (e, q)))
+    /// The (event, market) holding this venue market.
+    pub fn find_market(&self, venue_id: &str, venue_market_id: &str) -> Option<(&EventNode, &MarketNode)> {
+        let (e, m) = *self.markets.get(&(venue_id.to_string(), venue_market_id.to_string()))?;
+        Some((&self.events[e], &self.events[e].markets[m]))
     }
 }
 
@@ -228,9 +170,9 @@ mod tests {
 
     #[test]
     fn stable_ids_are_deterministic_and_prefixed() {
-        assert_eq!(stable_id("evt", "sports:nfl:atlanta-falcons|green-bay-packers:2026-09-25"), stable_id("evt", "sports:nfl:atlanta-falcons|green-bay-packers:2026-09-25"));
+        assert_eq!(stable_id("evt", "a|b:2026-09-25"), stable_id("evt", "a|b:2026-09-25"));
         assert_ne!(stable_id("evt", "a"), stable_id("evt", "b"));
-        assert!(stable_id("q", "x").starts_with("q_"));
+        assert!(stable_id("evt", "x").starts_with("evt_"));
         // Pinned: an id integrators may have stored must not change between releases.
         assert_eq!(stable_id("evt", "hello"), "evt_a430d84680aabd0b");
     }

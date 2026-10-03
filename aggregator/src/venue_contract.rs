@@ -211,25 +211,35 @@ pub(crate) async fn all_fixture_markets() -> Vec<VenueMarket> {
 #[tokio::test]
 #[ignore = "diagnostic: builds the event graph from every venue's fixtures and prints a summary"]
 async fn print_the_event_graph_built_from_fixtures() {
-    use crate::engine::build::{BuildConfig, build_graph};
+    use crate::engine::events::build_events;
     let markets = all_fixture_markets().await;
     let refs: Vec<&VenueMarket> = markets.iter().collect();
     let started = std::time::Instant::now();
-    let out = build_graph(&refs, &BuildConfig::default(), |_| true, crate::utils::time::now_unix());
-    println!("built {} events from {} markets in {:?}", out.graph.events.len(), markets.len(), started.elapsed());
-    let mut kinds = std::collections::BTreeMap::new();
-    for e in &out.graph.events {
-        for q in &e.questions {
-            *kinds.entry(format!("{:?}", q.kind)).or_insert(0) += 1;
+    let graph = build_events(&refs, |_| true, crate::utils::time::now_unix());
+    println!("built {} events from {} markets in {:?}", graph.events.len(), markets.len(), started.elapsed());
+    let mut reasons = std::collections::BTreeMap::new();
+    for e in &graph.events {
+        *reasons.entry(e.grouping.reason.clone()).or_insert(0) += 1;
+    }
+    println!("events by grouping reason: {reasons:?}");
+    println!("cross-venue events: {}", graph.events.iter().filter(|e| e.venue_count > 1).count());
+    println!("events with several markets: {}", graph.events.iter().filter(|e| e.market_count > 1).count());
+    println!("events without an image: {}", graph.events.iter().filter(|e| e.image_url.is_none()).count());
+    println!("== events grouped by shared words");
+    for e in graph.events.iter().filter(|e| e.grouping.reason == "terms") {
+        println!("* {} ({} markets; {})", e.title, e.market_count, e.grouping.detail);
+        for m in e.markets.iter().take(4) {
+            println!("     {} | {}", m.market.venue_id, m.market.title);
         }
     }
-    println!("questions by kind: {kinds:?}");
-    println!("cross-venue events: {}", out.graph.events.iter().filter(|e| e.venue_count > 1).count());
-    println!("decisions recorded: {} (merged {})", out.decisions.len(), out.decisions.iter().filter(|d| d.merged).count());
-    for e in out.graph.events.iter().step_by(out.graph.events.len().max(1) / 25) {
-        println!("- [{}|{}|{:?}] {}  ({} q, conf {})", e.category, e.domain, e.status, e.title, e.question_count, e.metadata_confidence);
-        for q in e.questions.iter().take(2) {
-            println!("     {:?}: {}  [{} outcomes]", q.kind, q.text, q.outcomes.len());
+    println!("== lone panta markets");
+    for e in graph.events.iter().filter(|e| e.grouping.reason == "single" && e.venues == ["panta"]).take(30) {
+        println!("- {} | image={}", e.markets[0].market.title, e.image_url.is_some());
+    }
+    for e in graph.events.iter().step_by(graph.events.len().max(1) / 25) {
+        println!("- [{}|{}|{}] {}  ({} markets, {})", e.category, e.domain, e.grouping.reason, e.title, e.market_count, e.grouping.detail);
+        for m in e.markets.iter().take(2) {
+            println!("     {} | {}", m.market.venue_id, m.market.title);
         }
     }
 }

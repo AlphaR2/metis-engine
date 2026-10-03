@@ -5,6 +5,8 @@
 //! Uses `Decimal`, not `f64` - exact fixed-point arithmetic, no float rounding error creeping
 //! into a fill estimate.
 
+#![allow(dead_code)] // Kept for the live price check the UI will want; no route calls it today.
+
 use rust_decimal::Decimal;
 
 /// One price/size level of a book side, straight from the venue.

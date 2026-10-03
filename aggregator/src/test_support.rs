@@ -10,7 +10,6 @@ use crate::models::venue::{
     Category, ListParams, MarketPage, OutcomeFraming, TradingModel, VenueCapabilities, VenueMarket, VenueQuote,
 };
 use crate::services::VenueAdapter;
-use crate::utils::http::venue_url_for_path;
 use crate::utils::time::now_unix;
 
 /// A venue that serves `pages` pages of `per_page` markets each, and fails every request for
@@ -23,6 +22,7 @@ pub struct ScriptedVenue {
     failing: Mutex<Vec<usize>>,
     generation: Mutex<u32>,
     /// Live quotes actually sent to this venue (cache hits don't count).
+    #[allow(dead_code)]
     pub quotes_taken: Mutex<u32>,
     /// Category names `filter_categories` returns (when `categorized`).
     pub filters: Mutex<Vec<String>>,
@@ -165,14 +165,6 @@ impl VenueAdapter for ScriptedVenue {
         })
     }
 
-    fn raw_path_prefixes(&self) -> &'static [&'static str] {
-        &["markets"]
-    }
-
-    async fn raw_get(&self, path: &str, _query: &[(String, String)]) -> Result<(u16, String), AdapterError> {
-        let url = venue_url_for_path("https://scripted.test/api/v1", path)?;
-        Ok((200, format!("{{\"url\": \"{url}\"}}")))
-    }
 }
 
 

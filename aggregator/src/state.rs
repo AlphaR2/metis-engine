@@ -13,8 +13,6 @@ pub struct AppState {
     /// repository; wired in ahead of persistence landing so `/health` can report DB reachability
     /// as soon as a pool exists.
     pub db: Option<PgPool>,
-    /// Shared secret guarding the operator-only routes. `None` disables them entirely.
-    pub admin_token: Option<Arc<String>>,
     /// Whether this deployment will build buy transactions. Off by default - see `Config`.
     pub execution_enabled: bool,
     /// Whether this deployment will build market-creation transactions. Off by default.

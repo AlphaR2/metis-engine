@@ -17,17 +17,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::engine::build::{BuildConfig, build_graph};
+use crate::engine::ai::{self, Cached};
+use crate::engine::events;
 use crate::engine::graph::EventGraph;
-use crate::engine::matching::{MatchDecision, MatchOverrides};
 use crate::errors::AdapterError;
 use crate::models::venue::{Category, CategoryAliases, ListParams, MarketPage, VenueMarket};
 use crate::repositories::health_repository::HealthRegistry;
 use crate::repositories::market_repository::MarketStore;
 use crate::repositories::market_store_db;
 use crate::repositories::positions_cache::PositionsCache;
-use crate::repositories::quote_cache::QuoteCache;
 use crate::services::VenueAdapter;
+use crate::services::llm::{self, LlmClient};
 use crate::services::registry::{RegisteredVenue, VenueSettings};
 use crate::utils::time::now_unix;
 
@@ -42,14 +42,12 @@ pub struct Aggregator {
     pub markets: tokio::sync::RwLock<MarketStore>,
     /// The canonical event graph behind `/v1`, swapped in whole after every rebuild.
     pub events: tokio::sync::RwLock<Arc<EventGraph>>,
-    /// Every cross-venue match decision from the latest rebuild, for `GET /admin/matches`.
-    pub match_decisions: tokio::sync::RwLock<Arc<Vec<MatchDecision>>>,
-    /// Operator merge/split decisions that every rebuild honours.
-    pub overrides: tokio::sync::RwLock<MatchOverrides>,
+    /// A model's decisions about lone markets, by `venue:market_id`, kept so each is asked once.
+    hints: tokio::sync::RwLock<HashMap<String, Cached>>,
+    /// The model that assists event grouping. `None` (no `ANTHROPIC_API_KEY`) means rules only.
+    llm: Option<LlmClient>,
     /// Live reachability state for every venue.
     pub health: HealthRegistry,
-    /// Seconds-long cache of live quotes, shared by every quoting route.
-    pub quotes: QuoteCache,
     /// Seconds-long cache of complete wallet position reads.
     pub positions: PositionsCache,
     /// Durability for the market store. `None` means in-memory only (no `DATABASE_URL`), which is
@@ -61,6 +59,10 @@ pub struct Aggregator {
     /// stack up concurrent full passes against the venues' rate limits.
     refresh_lock: tokio::sync::Mutex<()>,
 }
+
+/// How many lone markets one refresh may put to the model, and how many go in one request.
+const MAX_AI_MARKETS_PER_REFRESH: usize = 200;
+const AI_BATCH: usize = 25;
 
 /// Why one pagination chain produced nothing usable.
 enum ChainFailure {
@@ -83,10 +85,9 @@ impl Aggregator {
             db,
             markets: tokio::sync::RwLock::new(MarketStore::new()),
             events: tokio::sync::RwLock::new(Arc::new(EventGraph::default())),
-            match_decisions: tokio::sync::RwLock::new(Arc::new(Vec::new())),
-            overrides: tokio::sync::RwLock::new(MatchOverrides::default()),
+            hints: tokio::sync::RwLock::new(HashMap::new()),
+            llm: LlmClient::from_env(),
             health,
-            quotes: QuoteCache::new(),
             positions: PositionsCache::new(),
             refresh_lock: tokio::sync::Mutex::new(()),
         }
@@ -245,9 +246,9 @@ impl Aggregator {
     /// many markets were restored.
     pub async fn warm_start(&self) -> usize {
         let Some(pool) = &self.db else { return 0 };
-        match crate::repositories::overrides_db::load(pool).await {
-            Ok(overrides) => *self.overrides.write().await = overrides,
-            Err(err) => tracing::warn!("could not load match overrides from Postgres: {err}"),
+        match crate::repositories::subjects_db::load(pool).await {
+            Ok(saved) => *self.hints.write().await = saved,
+            Err(err) => tracing::warn!("could not load the model's grouping decisions from Postgres: {err}"),
         }
         match market_store_db::load_all(pool).await {
             Ok(buckets) => {
@@ -279,52 +280,113 @@ impl Aggregator {
         }
     }
 
-    /// Records an operator's merge (`merge: true`) or split for a pair of `venue:market_id`
-    /// listings, persists it, and rebuilds so it takes effect immediately.
-    pub async fn set_override(&self, left: &str, right: &str, merge: bool) -> Result<MatchOverrides, String> {
-        if let Some(pool) = &self.db {
-            crate::repositories::overrides_db::upsert(pool, left, right, merge)
-                .await
-                .map_err(|err| format!("could not persist the override: {err}"))?;
-        }
-        {
-            let mut overrides = self.overrides.write().await;
-            let same = |(a, b): &(String, String)| (a == left && b == right) || (a == right && b == left);
-            overrides.merge.retain(|p| !same(p));
-            overrides.split.retain(|p| !same(p));
-            let pair = (left.to_string(), right.to_string());
-            if merge { overrides.merge.push(pair) } else { overrides.split.push(pair) }
-        }
-        self.rebuild_graphs().await;
-        Ok(self.overrides.read().await.clone())
-    }
-
-    /// Rebuilds the event graph from the market store and swaps it in. It is built on a blocking
-    /// thread - it is CPU work over the whole catalog - and replaced in one write, so readers see
-    /// either the old graph or the new one, never a partial one.
+    /// Rebuilds the event graph from the market store and swaps it in. Building is CPU work over
+    /// the whole catalog, so it runs on a blocking thread, and the result replaces the old graph in
+    /// one write: readers see either the old graph or the new one, never a partial one.
+    ///
+    /// The graph is published from the rules (plus any earlier model decisions) first. If a model is
+    /// configured, the lone markets that resemble something are then put to it, and the graph is
+    /// rebuilt once with its answers. A model that is down or slow costs nothing but that rebuild.
     pub async fn rebuild_graphs(&self) {
-        let markets = self.markets.read().await.all_markets();
         let started = std::time::Instant::now();
-
-        let config = BuildConfig { overrides: self.overrides.read().await.clone(), ..BuildConfig::default() };
+        let markets = Arc::new(self.markets.read().await.all_markets());
+        let cached = self.hints.read().await.clone();
+        let now = now_unix();
         let routable: HashSet<String> =
             self.venues.iter().map(|v| v.id()).filter(|id| self.health.is_routable(id)).map(str::to_string).collect();
-        let now = now_unix();
-        let built = tokio::task::spawn_blocking(move || {
+
+        let work = {
+            let (markets, cached, routable) = (markets.clone(), cached.clone(), routable.clone());
+            tokio::task::spawn_blocking(move || {
+                let refs: Vec<&VenueMarket> = markets.iter().collect();
+                let prepared = events::prepare(&refs, now);
+                let clusters = prepared.clusters_with(&cached);
+                let input = prepared.ai_input(&clusters, &cached, MAX_AI_MARKETS_PER_REFRESH);
+                (prepared.build_with(clusters, |venue| routable.contains(venue), now), input)
+            })
+            .await
+        };
+        let (graph, input) = match work {
+            Ok(done) => done,
+            Err(err) => {
+                tracing::error!("event graph rebuild panicked - keeping the previous graph: {err}");
+                return;
+            }
+        };
+        let (events_count, multi) = (graph.events.len(), graph.events.iter().filter(|e| e.market_count > 1).count());
+        let without_image = graph.events.iter().filter(|e| e.image_url.is_none()).count();
+        *self.events.write().await = Arc::new(graph);
+        tracing::info!(
+            "event graph rebuilt in {:?}: {events_count} events ({multi} with several markets), {without_image} without an image",
+            started.elapsed()
+        );
+
+        if input.markets.is_empty() {
+            return;
+        }
+        let Some(llm) = &self.llm else { return };
+        let learned = self.ask_model(llm, input).await;
+        if learned == 0 {
+            return;
+        }
+        // Rebuild once with what the model said. No further model calls: they are all cached now.
+        let cached = self.hints.read().await.clone();
+        let rebuilt = tokio::task::spawn_blocking(move || {
             let refs: Vec<&VenueMarket> = markets.iter().collect();
-            build_graph(&refs, &config, |venue| routable.contains(venue), now)
+            let prepared = events::prepare(&refs, now);
+            let clusters = prepared.clusters_with(&cached);
+            prepared.build_with(clusters, |venue| routable.contains(venue), now)
         })
         .await;
-        match built {
-            Ok(out) => {
-                let events = out.graph.events.len();
-                let cross_venue = out.graph.events.iter().filter(|e| e.venue_count > 1).count();
-                *self.events.write().await = Arc::new(out.graph);
-                *self.match_decisions.write().await = Arc::new(out.decisions);
-                tracing::info!("event graph rebuilt in {:?}: {events} events, {cross_venue} across venues", started.elapsed());
+        match rebuilt {
+            Ok(graph) => {
+                tracing::info!("event graph rebuilt with {learned} model decisions: {} events", graph.events.len());
+                *self.events.write().await = Arc::new(graph);
             }
-            Err(err) => tracing::error!("event graph rebuild panicked - keeping the previous graph: {err}"),
+            Err(err) => tracing::error!("event graph rebuild with model decisions panicked - keeping the rules-only graph: {err}"),
         }
+    }
+
+    /// Puts `input` to the model in batches and caches what it says. Returns how many decisions
+    /// were learned. A failed batch is skipped; its markets are asked again next refresh.
+    async fn ask_model(&self, llm: &LlmClient, input: events::AiInput) -> usize {
+        let mut learned: Vec<(String, Cached)> = Vec::new();
+        for batch in input.markets.chunks(AI_BATCH) {
+            let ids: Vec<&str> = batch.iter().map(|m| m.id.as_str()).collect();
+            let batch_id = crate::engine::graph::stable_id("b", &ids.join("|"))[2..].to_string();
+            let wanted: HashSet<&str> = batch.iter().flat_map(|m| m.candidates.iter().map(String::as_str)).collect();
+            let clusters: Vec<ai::AiCluster> = input.clusters.iter().filter(|c| wanted.contains(c.key.as_str())).cloned().collect();
+            let prompt = ai::build_prompt(batch, &clusters);
+            match llm.complete(ai::SYSTEM_PROMPT, &prompt).await {
+                Ok(reply) => {
+                    let valid_markets: HashSet<String> = batch.iter().map(|m| m.id.clone()).collect();
+                    let valid_clusters: HashSet<String> = clusters.iter().map(|c| c.key.clone()).collect();
+                    let hints = ai::parse_response(&reply, &batch_id, &valid_markets, &valid_clusters);
+                    for market in batch {
+                        // Every market in an answered batch is cached, including "leave alone", so it is
+                        // not asked about again until its text changes.
+                        let hint = hints.get(&market.id).cloned().unwrap_or_default();
+                        if let Some(hash) = input.hashes.get(&market.id) {
+                            learned.push((market.id.clone(), Cached::from_hint(hash.clone(), &hint)));
+                        }
+                    }
+                }
+                Err(err) => tracing::warn!("model grouping batch skipped: {err}"),
+            }
+        }
+        if learned.is_empty() {
+            return 0;
+        }
+        // Only an answer that changes something is worth a rebuild.
+        let effective = learned.iter().filter(|(_, c)| c.join.is_some() || c.group.is_some()).count();
+        if let Some(pool) = &self.db
+            && let Err(err) = crate::repositories::subjects_db::save(pool, &learned, llm::MODEL).await
+        {
+            tracing::warn!("could not persist the model's grouping decisions: {err}");
+        }
+        let mut cache = self.hints.write().await;
+        cache.extend(learned);
+        effective
     }
 
     /// Walks one pagination chain to its end (or the page cap), returning every market that passes

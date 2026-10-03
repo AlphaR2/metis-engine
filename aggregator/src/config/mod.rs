@@ -1,5 +1,8 @@
 //! One place that declares every env var this service reads - `Config::from_env()` builds it,
 //! `.validate()` checks it's actually usable before the server starts.
+//!
+//! The MVP keeps this deliberately short: venue keys, a mode, a port and two optional extras
+//! (a database and a Solana RPC for Panta discovery). Everything else has a fixed default.
 
 use std::collections::HashMap;
 use std::env;
@@ -13,7 +16,8 @@ pub struct VenueConfig {
     pub id: String,
     pub kind: String,
     pub base_url: Option<String>,
-    /// Empty when unset - every call to that venue then fails, logged as a warning at boot.
+    /// Empty when unset. Jupiter's catalog reads work without one (the header is then omitted);
+    /// Panta's do not, and fail with a warning at boot.
     pub api_key: String,
     /// Every other `<ID>_<NAME>` variable, keyed by `<NAME>`.
     pub options: HashMap<String, String>,
@@ -53,60 +57,29 @@ impl VenueConfig {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub port: String,
-    pub cors_origin: String,
+    /// Origins allowed to call the API, comma-separated `scheme://host[:port]`. Unset allows any
+    /// origin: the API holds no cookies or credentials, so there is nothing for another site to ride.
+    pub cors_origin: Option<String>,
     /// The venues to wire up, in `ENABLED_VENUES` order (comma-separated ids, default
     /// `panta,jupiter`). Each reads its own `<ID>_*` settings; see `VenueConfig`.
     pub venues: Vec<VenueConfig>,
     /// Extra category aliases, `from=to,from=to`, on top of `CategoryAliases::defaults()`.
     pub category_aliases: String,
-    /// Postgres connection string. Optional for now, not required: unset means the server runs
-    /// in-memory-only (today's behavior) rather than refusing to boot - lets persistence land and
-    /// be wired in ahead of the hosted DB actually being provisioned. Once repositories are fully
-    /// DB-backed this should become a hard requirement instead.
+    /// Postgres connection string. Optional: unset means the server runs in-memory-only.
     pub database_url: Option<String>,
-    /// `sqlx::PgPoolOptions` max connections - default matches mobile-server's `DATABASE_POOL_SIZE`.
+    /// `sqlx::PgPoolOptions` max connections.
     pub database_pool_size: u32,
-    /// How often the background refresh re-pulls every venue, in seconds. Without this the
-    /// catalog is only ever as fresh as the boot-time pull plus whatever manual `POST /refresh`
-    /// calls happen to land.
-    ///
-    /// Default 600. A full measured pass takes 3-4 minutes (Panta ~20s, then Jupiter's ten
-    /// categories at ~25s each, paced to stay under its rate limit), so a shorter interval would
-    /// leave the service refreshing almost continuously. What this refresh captures - which
-    /// markets exist and when they close - changes slowly; live pricing comes from `quote_size`
-    /// on the request path, not from here.
+    /// How often the background refresh re-pulls every venue, in seconds. Default 600: a full pass
+    /// takes 3-4 minutes, and what it captures (which markets exist, when they close) changes
+    /// slowly; live pricing comes from the live routes, not from here.
     pub refresh_interval_secs: u64,
-    /// Whether the aggregator will build buy transactions at all.
-    ///
-    /// **Default false.** Off means the execution routes refuse and no venue order call is made.
-    /// A buy spends real USDC and cannot be undone, so it is switched on deliberately rather than
-    /// arriving with a deploy.
-    pub execution_enabled: bool,
-    /// Whether the aggregator will build market-creation transactions.
-    ///
-    /// **Default false**, for the same reason and one more: a created market is a permanent public
-    /// artifact carrying the creating wallet's name, and there is no delete.
-    pub market_creation_enabled: bool,
-    /// Shared secret for the operator-only routes (`POST /refresh`, `GET /metrics`). Unset means
-    /// those routes are refused outright rather than left open - a refresh is a multi-minute
-    /// fan-out across every venue, which is not something an anonymous caller should be able to
-    /// trigger at will.
-    pub admin_token: Option<String>,
+    /// Whether this deployment builds transactions (buys, sells, claims, market creation).
+    /// `MODE=read` turns all of it off and leaves a read-only catalog; anything else, including
+    /// unset, is write. The aggregator never signs or broadcasts either way.
+    pub write_mode: bool,
     /// Longest any single API request may run before it is answered 408. Default 45s: long
-    /// enough for a `quote_size` request's concurrent live quotes (each capped at 30s by the
-    /// venue client), short enough that a stuck venue can't pin connections open.
+    /// enough for a live-quote fan-out, short enough that a stuck venue can't pin connections open.
     pub request_timeout_secs: u64,
-    /// Requests per minute each client IP may make to the public routes; a request that takes live
-    /// venue quotes costs 10. `0` disables limiting. Default 300.
-    pub rate_limit_per_minute: u32,
-    /// Take the client IP from the first `X-Forwarded-For` entry. Only safe behind a proxy that
-    /// overwrites that header - otherwise any client can pick its own identity. Default false.
-    pub trust_forwarded_for: bool,
-    /// How many proxies in front of this service append to `X-Forwarded-For` (default 1; a CDN in
-    /// front of a load balancer is 2). Only read when `trust_forwarded_for` is set. The client's
-    /// address is that many entries from the right of the header - never the leftmost, which the
-    /// client controls.
-    pub trusted_proxy_hops: usize,
 }
 
 /// The venues wired up when `ENABLED_VENUES` is unset.
@@ -115,7 +88,7 @@ fn default_enabled_venues() -> Vec<String> {
 }
 
 impl Config {
-    /// Reads every setting from the environment, falling back to sane MVP defaults.
+    /// Reads every setting from the environment, falling back to MVP defaults.
     pub fn from_env() -> Self {
         let vars: HashMap<String, String> = env::vars().collect();
         let enabled_venues: Vec<String> = env::var("ENABLED_VENUES")
@@ -124,52 +97,31 @@ impl Config {
             .unwrap_or_else(default_enabled_venues);
         Self {
             port: env::var("PORT").unwrap_or_else(|_| "8080".to_string()),
-            cors_origin: env::var("CORS_ORIGIN").unwrap_or_else(|_| "http://localhost:3000".to_string()),
+            cors_origin: env::var("CORS_ORIGIN").ok().filter(|v| !v.trim().is_empty()),
             venues: enabled_venues.iter().map(|id| VenueConfig::from_vars(id, &vars)).collect(),
             category_aliases: env::var("CATEGORY_ALIASES").unwrap_or_default(),
-            database_url: env::var("DATABASE_URL").ok(),
-            database_pool_size: env::var("DATABASE_POOL_SIZE")
-                .ok()
-                .and_then(|raw| raw.parse().ok())
-                .unwrap_or(15),
+            database_url: env::var("DATABASE_URL").ok().filter(|v| !v.trim().is_empty()),
+            database_pool_size: env::var("DATABASE_POOL_SIZE").ok().and_then(|raw| raw.parse().ok()).unwrap_or(15),
             refresh_interval_secs: env::var("REFRESH_INTERVAL_SECS")
                 .ok()
                 .and_then(|raw| raw.parse().ok())
                 .filter(|secs| *secs >= 30)
                 .unwrap_or(600),
-            // Anything other than an explicit "true" is off - a typo must fail closed, never open.
-            execution_enabled: env::var("EXECUTION_ENABLED")
-                .map(|v| v.trim().eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-            market_creation_enabled: env::var("MARKET_CREATION_ENABLED")
-                .map(|v| v.trim().eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-            admin_token: env::var("ADMIN_TOKEN").ok().filter(|t| !t.trim().is_empty()),
+            write_mode: !env::var("MODE").is_ok_and(|v| v.trim().eq_ignore_ascii_case("read")),
             request_timeout_secs: env::var("REQUEST_TIMEOUT_SECS")
                 .ok()
                 .and_then(|raw| raw.parse().ok())
                 .filter(|secs| *secs >= 1)
                 .unwrap_or(45),
-            rate_limit_per_minute: env::var("RATE_LIMIT_PER_MINUTE")
-                .ok()
-                .and_then(|raw| raw.parse().ok())
-                .unwrap_or(300),
-            trust_forwarded_for: env::var("TRUST_FORWARDED_FOR")
-                .map(|v| v.trim().eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-            trusted_proxy_hops: env::var("TRUSTED_PROXY_HOPS")
-                .ok()
-                .and_then(|raw| raw.parse().ok())
-                .filter(|hops| *hops >= 1)
-                .unwrap_or(1),
         }
     }
 
-    /// Checks the config is actually usable - a malformed `CORS_ORIGIN` would otherwise only
-    /// surface as a panic deep inside axum's CORS layer construction, and a wildcard or a
-    /// trailing slash would validate as a header value and then silently misbehave.
+    /// Checks the config is actually usable: a malformed `CORS_ORIGIN` would otherwise surface as
+    /// a panic deep inside the CORS layer's construction.
     pub fn validate(&self) -> Result<(), String> {
-        crate::middleware::parse_origins(&self.cors_origin)?;
+        if let Some(origins) = &self.cors_origin {
+            crate::middleware::parse_origins(origins)?;
+        }
         Ok(())
     }
 }
@@ -178,44 +130,39 @@ impl Config {
 mod tests {
     use super::*;
 
-    fn config_with(cors_origin: &str) -> Config {
+    fn config_with(cors_origin: Option<&str>) -> Config {
         Config {
             port: "8080".to_string(),
-            cors_origin: cors_origin.to_string(),
+            cors_origin: cors_origin.map(str::to_string),
             venues: vec![],
             category_aliases: String::new(),
             database_url: None,
             database_pool_size: 15,
             refresh_interval_secs: 600,
-            execution_enabled: false,
-            market_creation_enabled: false,
-            admin_token: None,
+            write_mode: true,
             request_timeout_secs: 45,
-            rate_limit_per_minute: 300,
-            trust_forwarded_for: false,
-            trusted_proxy_hops: 1,
         }
     }
 
     #[test]
-    fn a_normal_origin_validates() {
-        assert!(config_with("http://localhost:3000").validate().is_ok());
+    fn no_cors_origin_is_fine_and_means_any() {
+        assert!(config_with(None).validate().is_ok());
     }
 
     #[test]
-    fn an_origin_with_invalid_header_bytes_fails_validation() {
-        assert!(config_with("http://\ninvalid").validate().is_err());
+    fn a_normal_origin_validates() {
+        assert!(config_with(Some("http://localhost:3000")).validate().is_ok());
     }
 
     #[test]
     fn several_origins_validate() {
-        assert!(config_with("https://metis.example, https://staging.metis.example").validate().is_ok());
+        assert!(config_with(Some("https://metis.example, https://staging.metis.example")).validate().is_ok());
     }
 
     #[test]
-    fn wildcards_paths_and_empty_lists_are_refused() {
-        for bad in ["*", "https://*.example.com", "https://metis.example/", "https://metis.example/app", "metis.example", "", " , "] {
-            assert!(config_with(bad).validate().is_err(), "{bad:?} should be refused");
+    fn malformed_origins_are_refused_at_startup() {
+        for bad in ["*", "https://*.example.com", "https://metis.example/", "https://metis.example/app", "metis.example", "http://\ninvalid"] {
+            assert!(config_with(Some(bad)).validate().is_err(), "{bad:?} should be refused");
         }
     }
 
@@ -244,19 +191,5 @@ mod tests {
         assert_eq!(other.kind, "jupiter");
         assert_eq!(other.base_url.as_deref(), Some("https://example.test/v1"));
         assert_eq!(other.api_key, "");
-    }
-
-    #[test]
-    fn money_moving_flags_are_off_unless_explicitly_true() {
-        // Read directly rather than through from_env(), which would depend on process-wide state.
-        let parse = |raw: Option<&str>| {
-            raw.map(|v| v.trim().eq_ignore_ascii_case("true")).unwrap_or(false)
-        };
-        assert!(!parse(None), "unset must be off");
-        assert!(!parse(Some("")), "empty must be off");
-        assert!(!parse(Some("1")), "1 is not true - only the word counts");
-        assert!(!parse(Some("yes")), "yes is not true");
-        assert!(parse(Some("true")), "the word itself turns it on");
-        assert!(parse(Some("  TRUE  ")), "case and surrounding space are tolerated");
     }
 }

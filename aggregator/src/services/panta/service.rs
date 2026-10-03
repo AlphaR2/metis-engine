@@ -25,6 +25,7 @@ pub struct PantaAdapter {
     /// Panta's quote endpoint requires a buyer wallet even for a pure quote (no trade is
     /// executed at this stage) - a fixed quoting wallet is fine here since nothing is signed
     /// or moved; a real per-user wallet only matters once actual execution is built.
+    #[allow(dead_code)] // used by the price quote, which no route calls today
     quote_wallet: String,
     /// Detail rows already fetched, by market id, with when. See `reconcile_with_details`.
     details: std::sync::Mutex<std::collections::HashMap<String, (i64, PantaMarketRow)>>,
@@ -184,14 +185,6 @@ impl VenueAdapter for PantaAdapter {
             can_claim: true,
             can_sell: false,
         }
-    }
-
-    fn raw_path_prefixes(&self) -> &'static [&'static str] {
-        &["markets"]
-    }
-
-    async fn raw_get(&self, path: &str, query: &[(String, String)]) -> Result<(u16, String), AdapterError> {
-        client::raw_get(&self.client, &self.base_url, &self.api_key, path, query).await
     }
 
     async fn build_create_market(

@@ -10,7 +10,7 @@ use std::time::Duration;
 use rust_decimal::Decimal;
 
 use crate::aggregator::Aggregator;
-use crate::engine::graph::{EventGraph, QuestionNode};
+use crate::engine::graph::{EventGraph, MarketNode};
 use crate::errors::{AdapterError, ApiError};
 use crate::models::position::{Position, PositionState, PositionsResponse, VenueFailure};
 use crate::utils::time::now_unix;
@@ -19,32 +19,34 @@ use crate::utils::time::now_unix;
 /// slow venue costs the caller its own rows, not the whole response.
 const VENUE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The price the catalog holds for one side of one market, from whichever outcome lists it.
-fn catalog_price(question: &QuestionNode, venue_id: &str, venue_market_id: &str, side: &str) -> Option<Decimal> {
-    question
-        .outcomes
-        .iter()
-        .flat_map(|outcome| outcome.listings.iter())
-        .find(|l| l.venue_id == venue_id && l.venue_market_id == venue_market_id && l.side.eq_ignore_ascii_case(side))
-        .and_then(|l| l.price)
+/// The price the catalog holds for one side of a market.
+fn catalog_price(node: &MarketNode, side: &str) -> Option<Decimal> {
+    let price = match side.to_ascii_lowercase().as_str() {
+        "no" | "short" => node.market.no_price.as_deref(),
+        _ => node.market.yes_price.as_deref(),
+    };
+    price.and_then(|p| p.parse().ok())
 }
 
-/// Adds what the event graph knows: the event, a title if the venue gave none, and, for an open
-/// position the venue did not value, an **estimate** from the catalog price (flagged as one).
+/// Adds what the event graph knows: the event, the market's own title if the venue gave none, and,
+/// for an open position the venue did not value, an **estimate** from the catalog price (flagged
+/// as one).
 fn enrich(position: &mut Position, graph: &EventGraph) {
-    let Some((event, question)) = graph.find_listing(&position.venue_id, &position.venue_market_id) else {
+    let Some((event, node)) = graph.find_market(&position.venue_id, &position.venue_market_id) else {
         return;
     };
     position.event_id = Some(event.id.clone());
     position.event_title = Some(event.title.clone());
     if position.title.is_none() {
-        position.title = Some(question.text.clone());
+        position.title = Some(node.market.title.clone());
     }
-    if position.value_usdc.is_none() && position.state == PositionState::Open && position.contracts > Decimal::ZERO {
-        if let Some(price) = catalog_price(question, &position.venue_id, &position.venue_market_id, &position.side) {
-            position.value_usdc = Some(position.contracts * price);
-            position.value_is_estimate = true;
-        }
+    if position.value_usdc.is_none()
+        && position.state == PositionState::Open
+        && position.contracts > Decimal::ZERO
+        && let Some(price) = catalog_price(node, &position.side)
+    {
+        position.value_usdc = Some(position.contracts * price);
+        position.value_is_estimate = true;
     }
 }
 

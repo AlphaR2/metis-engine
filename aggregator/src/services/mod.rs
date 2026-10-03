@@ -4,12 +4,11 @@
 //! + `client.rs` (raw HTTP/wire calls only).
 
 pub mod jupiter;
+pub mod llm;
 pub mod maths;
 pub mod panta;
 pub mod positions;
-pub mod quoting;
 pub mod registry;
-pub mod routing;
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
@@ -34,7 +33,9 @@ pub trait VenueAdapter: Send + Sync {
     /// `GET /v1/markets/{venue}/{id}/live`). May lack fields only the list carries - Jupiter's
     /// bare market has no category - so callers overlay what the catalog holds.
     async fn get_market(&self, venue_market_id: &str) -> Result<VenueMarket, AdapterError>;
-    /// Prices buying `amount_usdc` of `side` on this market right now.
+    /// Prices buying `amount_usdc` of `side` on this market right now. No route calls it today;
+    /// it stays for the live price check the UI will want.
+    #[allow(dead_code)]
     async fn quote(
         &self,
         venue_market_id: &str,
@@ -50,28 +51,6 @@ pub trait VenueAdapter: Send + Sync {
     /// server-side category filter: the unfiltered sweep is the whole catalog.
     async fn filter_categories(&self) -> Result<Vec<String>, AdapterError> {
         Ok(Vec::new())
-    }
-
-    /// Fetches a raw GET from this venue's API and returns the body **exactly as sent** - no
-    /// parsing, no filtering, no normalisation.
-    ///
-    /// This exists to answer "what does the venue actually return", which no amount of reading our
-    /// own models can tell you: every other path through this service has already dropped dead
-    /// rows, filled in fallbacks and reshaped fields by the time you see anything. When a venue's
-    /// data looks wrong, this is what distinguishes *their* bug from *ours*.
-    ///
-    /// GET only, deliberately: it borrows the venue credentials, and a general relay that could
-    /// also POST would be a way to place orders through someone else's key. Returns the upstream
-    /// status code alongside the body so a venue error is not dressed up as a 200.
-    async fn raw_get(&self, _path: &str, _query: &[(String, String)]) -> Result<(u16, String), AdapterError> {
-        Err(AdapterError::Unsupported { venue: self.id(), action: "raw inspection" })
-    }
-
-    /// First path segments `raw_get` may reach on this venue - read-only catalog endpoints only.
-    /// Anything else on the venue's host (order routes, account data, other products sharing the
-    /// same API key) stays out of reach even for an operator. Empty means no raw inspection.
-    fn raw_path_prefixes(&self) -> &'static [&'static str] {
-        &[]
     }
 
     // ── Actions that need a signature ───────────────────────────────────────────────────────

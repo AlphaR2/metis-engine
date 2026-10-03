@@ -1,17 +1,13 @@
-//! Cross-cutting HTTP concerns - CORS, operator-route auth, per-client rate limiting and request
-//! metrics.
+//! Cross-cutting HTTP concerns - CORS, per-client rate limiting and request metrics.
 
 use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderValue, Method, header};
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::extract::Request;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::state::AppState;
-
-/// Header carrying the operator token.
-pub const ADMIN_TOKEN_HEADER: &str = "x-admin-token";
 
 /// Parses `CORS_ORIGIN`: one origin or a comma-separated list, each exactly `scheme://host[:port]`.
 ///
@@ -44,49 +40,22 @@ pub fn parse_origins(raw: &str) -> Result<Vec<HeaderValue>, String> {
         .collect()
 }
 
-/// Builds the CORS layer, restricted to exactly the configured origins.
+/// Builds the CORS layer: any origin when none is configured, otherwise exactly the configured ones.
 ///
 /// Methods and request headers are the ones the public API uses, not `Any`. Response headers a
 /// browser client needs are exposed explicitly: `Retry-After` is not CORS-safelisted, so without
 /// this a page cannot read how long to back off after a 429, and `ETag` likewise.
-pub fn cors_layer(origins: &str) -> CorsLayer {
-    let origins = parse_origins(origins).expect("CORS_ORIGIN checked by Config::validate()");
+pub fn cors_layer(origins: Option<&str>) -> CorsLayer {
+    let allow = match origins {
+        Some(raw) => AllowOrigin::list(parse_origins(raw).expect("CORS_ORIGIN checked by Config::validate()")),
+        None => AllowOrigin::any(),
+    };
     CorsLayer::new()
-        .allow_origin(AllowOrigin::list(origins))
+        .allow_origin(allow)
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE, header::ACCEPT, header::IF_NONE_MATCH])
         .expose_headers([header::RETRY_AFTER, header::ETAG])
         .max_age(std::time::Duration::from_secs(600))
-}
-
-/// Gate for operator-only routes (`POST /refresh`, `GET /metrics`).
-///
-/// A refresh fans out across every venue and category, so leaving it open lets any caller drive
-/// our outbound rate limit; `/metrics` leaks internal state. When no `ADMIN_TOKEN` is configured
-/// these routes are refused outright rather than left open - failing closed is the only safe
-/// default for an endpoint whose cost is paid against someone else's API.
-pub async fn require_admin_token(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    request: Request,
-    next: Next,
-) -> Result<Response, (StatusCode, String)> {
-    let Some(expected) = state.admin_token.as_deref() else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "operator routes are disabled - set ADMIN_TOKEN to enable them".to_string(),
-        ));
-    };
-    let presented = headers.get(ADMIN_TOKEN_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
-    // Constant-time-ish compare: length first, then bytes, so a mismatch doesn't leak the prefix
-    // length through timing. Not a hardened primitive, but there's no reason to make it easy.
-    let matches = presented.len() == expected.len()
-        && presented.bytes().zip(expected.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
-    if matches {
-        Ok(next.run(request).await)
-    } else {
-        Err((StatusCode::UNAUTHORIZED, format!("missing or invalid {ADMIN_TOKEN_HEADER}")))
-    }
 }
 
 /// Records every request's latency under its matched route template.
@@ -139,13 +108,6 @@ impl RateLimiter {
             proxy_hops: 1,
             buckets: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
-    }
-
-    /// How many proxies in front of this service append to `X-Forwarded-For` (default 1; a CDN
-    /// in front of a load balancer is 2). Zero is treated as 1.
-    pub fn with_proxy_hops(mut self, hops: usize) -> Self {
-        self.proxy_hops = hops.max(1);
-        self
     }
 
     /// Takes `cost` tokens for `client` if it has them; otherwise returns how many seconds until

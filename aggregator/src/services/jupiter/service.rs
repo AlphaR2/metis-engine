@@ -29,8 +29,6 @@ pub struct JupiterAdapter {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
-    /// Programs a built transaction may invoke beyond the defaults (`JUPITER_EXTRA_PROGRAMS`).
-    extra_programs: Vec<String>,
 }
 
 /// Jupiter Prediction's issuer program, from its developer documentation
@@ -41,14 +39,7 @@ pub const ISSUER_PROGRAM: &str = "2sVcg2dBSUzXkmdZ8M5cp1LbnzDrWJmr6hktkHwB8nY3";
 impl JupiterAdapter {
     /// Builds an adapter for the given base URL and API key.
     pub fn new(base_url: String, api_key: String) -> Self {
-        Self { client: client_with_timeout(), base_url, api_key, extra_programs: Vec::new() }
-    }
-
-    /// Allows further programs in built transactions, for a program Jupiter adds that this
-    /// service has not been told about yet. Blank entries are ignored.
-    pub fn with_extra_programs(mut self, programs: impl IntoIterator<Item = String>) -> Self {
-        self.extra_programs = programs.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
-        self
+        Self { client: client_with_timeout(), base_url, api_key }
     }
 
     /// Refuses a transaction Jupiter built unless it is a plain trade for `wallet`: see
@@ -57,7 +48,6 @@ impl JupiterAdapter {
     fn guard(&self, built: UnsignedTransaction, wallet: &str) -> Result<UnsignedTransaction, AdapterError> {
         let mut allowed: Vec<&str> = vec![ISSUER_PROGRAM];
         allowed.extend(crate::utils::solana_tx::COMMON_PROGRAMS);
-        allowed.extend(self.extra_programs.iter().map(String::as_str));
         crate::utils::solana_tx::verify_venue_transaction(&built.transaction, wallet, &allowed).map_err(|e| {
             // Refused, not failed: the venue answered, and what it answered is not safe to sign.
             // Logged loudly because a tampered response and a program Jupiter newly started using
@@ -73,6 +63,7 @@ impl JupiterAdapter {
 /// string; quantity is a raw JSON number (unlike every other venue's book, which sends both as
 /// strings) - converted via `from_f64_retain` rather than a plain cast, so a row with a
 /// NaN/infinite quantity gets skipped rather than silently becoming zero.
+#[allow(dead_code)]
 fn parse_levels(raw: &[(String, f64)]) -> Vec<Level> {
     raw.iter()
         .filter_map(|(price, size)| {
@@ -119,14 +110,6 @@ impl VenueAdapter for JupiterAdapter {
 
     async fn get_market(&self, venue_market_id: &str) -> Result<VenueMarket, AdapterError> {
         client::get_market(&self.client, &self.base_url, &self.api_key, venue_market_id).await
-    }
-
-    fn raw_path_prefixes(&self) -> &'static [&'static str] {
-        &["events", "markets", "orderbook"]
-    }
-
-    async fn raw_get(&self, path: &str, query: &[(String, String)]) -> Result<(u16, String), AdapterError> {
-        client::raw_get(&self.client, &self.base_url, &self.api_key, path, query).await
     }
 
     async fn build_buy(&self, intent: &BuyIntent) -> Result<UnsignedTransaction, AdapterError> {
@@ -330,14 +313,12 @@ mod tests {
     }
 
     #[test]
-    fn a_transaction_invoking_an_unknown_program_is_refused_until_it_is_configured() {
+    fn a_transaction_invoking_an_unknown_program_is_refused() {
         let rogue = solana_tx::encode_32(&key(200));
         let adapter = JupiterAdapter::new("http://x".into(), "k".into());
         let err = adapter.guard(built(&[trade_on(&rogue)]), &wallet()).unwrap_err();
         assert!(err.to_string().contains("unexpected program"), "{err}");
 
-        let adapter = adapter.with_extra_programs([format!(" {rogue} "), String::new()]);
-        assert!(adapter.guard(built(&[trade_on(&rogue)]), &wallet()).is_ok(), "an operator can allow it explicitly");
     }
 
     #[test]

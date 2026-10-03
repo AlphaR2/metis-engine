@@ -4,53 +4,47 @@ The off-chain aggregation API (`metis-api`). Discovers prediction markets across
 network, serves them by category, and ranks them by price, liquidity and execution quality.
 
 It discovers, prices and recommends, and can **build** (never sign or broadcast) buy, claim and
-market-creation transactions for the caller's wallet. Building is off unless `EXECUTION_ENABLED` /
-`MARKET_CREATION_ENABLED` are explicitly `true`.
+market-creation transactions for the caller's wallet. Set `MODE=read` to switch building off and serve a read-only catalog.
 
-## The `/v1` API — events first
+## The `/v1` API: events
 
-`/v1` serves the canonical **event graph**: Event → Question → Outcome → Listing, rebuilt from
-the market store after every refresh (`src/engine/`) and swapped in whole.
+An **event** is our own aggregation of markets about one real-world subject: a match, one season of a
+show, a launch, a token sale, an asset on a day, an election. It carries our metadata (title, image,
+category, tags, dates, volume, venues, a 0-100 rating, and *why* its markets were grouped). The
+**markets** under it are the venues' own markets, **exactly as sent**, each annotated (never rewritten)
+with our rating and the identical question on another venue. A market that matches nothing is its own
+event. Filtering, sorting and rating happen at event level; inside an event the markets re-sort.
 
 | Endpoint | What it returns |
 |---|---|
-| `GET /v1/events` | Event cards: metadata, and a headline question with each outcome's best price and venue. Filters: `category`, `domain`, `status` (`open` by default), `within_days`, `q`, `venue`, `min_venues`. Sort: `best`, `closing_soonest`, `volume`. |
-| `GET /v1/events/{id}` | The full event: every question as a sentence, every outcome, every venue listing rated best-first with its breakdown |
-| `GET /v1/events/{id}/questions/{qid}` | One question in full |
-| `GET /v1/markets` | Every venue market, flat, each carrying `event_id`, `event_title`, `question_id` and `question_text` |
-| `GET /v1/markets/{venue}/{id}` | One market with its event context, from the last refresh |
-| `GET /v1/markets/{venue}/{id}/live` | The same market read from the venue right now (`held` says whether the catalog also has it; `fetched_at` is when). Costs a venue call, so it is rate-limited like a live quote |
-| `GET /v1/categories` | Categories as the venues report them, with each venue's own names and event/market counts |
-| `GET /v1/venues` | Enabled venues, their capabilities, health and staleness |
-| `POST /v1/route` | The best venue to back one outcome at a size, from live quotes, with fees included |
+| `GET /v1/events` | Event cards, each with a preview of its three best markets. Filters: `category`, `domain`, `status` (`open` by default), `within_days`, `q`, `venue`, `min_venues`. Sort: `best` (our event rating), `closing_soonest`, `volume`. |
+| `GET /v1/events/{id}` | The event and all its raw markets. `?sort=rating|volume|closing|price`, `?venue=` |
+| `GET /v1/markets` | Every venue market, flat, each carrying its `event_id` |
+| `GET /v1/markets/{venue}/{id}` | One market with its event, from the last refresh |
+| `GET /v1/markets/{venue}/{id}/live` | The same market read from the venue right now |
+| `GET /v1/categories` | Categories as the venues report them, with counts |
+| `GET /v1/venues` | Enabled venues, capabilities, health and staleness |
 
-Lists use opaque `cursor`s, and responses carry an `ETag` (`If-None-Match` gets a 304) and
-`Cache-Control: max-age=30`. Ids are hashes of venue identifiers (`evt_…`, `q_…`, `o_…`), so they
-stay the same across rebuilds and restarts. When a merge folds one venue's event into another,
-the folded event's id still resolves.
+Lists use opaque `cursor`s, and responses carry an `ETag` and `Cache-Control: max-age=30`.
 
-**How events are built** (deterministic; no model calls):
+**How events are built** (`src/engine/`):
 
-- **Structure.** A matchup is one *winner* question (NO on one side backs the other). Exclusive
-  options (candidates, ranges, temperature buckets; YES prices sum to about 1) are one *multi*
-  question. Independent thresholds and deadlines are one yes/no question each.
-- **Extraction.** Entities come from a seeded dictionary (assets, stocks, commodities, countries)
-  plus participants the venues attach (Jupiter teams, with nicknames and abbreviations). Numbers
-  are read with magnitudes, dates in any written form, and direction from wording. Questions are
-  written as full sentences: "Will Bitcoin reach $90,000 by Dec 31, 2026?",
-  "Bitcoin above 82,000 on September 24?".
-- **Matching.** Exact canonical keys first (`px:bitcoin:above:90000:2026-12-31:touch`,
-  `win:a|b:date`). Otherwise candidates are grouped by shared entity, then:
-  - hard constraints are applied: different threshold, direction, subject, date or settlement
-    style (hit-at-any-point vs price-on-the-date) means *different*;
-  - a weighted score decides the rest: a pair merges only at 0.90 or above.
-
-  A binary about one option ("Marco Rubio to win the nomination") folds into that option of a
-  multi-choice question. Scored merges are marked `rules_differ` and shown side by side.
-  Decisions are reviewable at `GET /admin/matches`; `POST /admin/matches/merge|split` overrides
-  persist and apply on every rebuild.
-- **Rating.** Only listings of the same outcome are compared: price (40), activity (10) and
-  venue reliability (10), renormalised over the components a venue can provide.
+1. **Profile** each market from what the venue sent: title, its venue event's title and tags, outcome
+   labels, dates, entities from a seeded dictionary (assets, countries, teams the venues attach), a season
+   number and year.
+2. **Cluster** with rules, recording the reason: `venue_event` (the venue grouped them), `match` (the same
+   two sides on the same day), `price` (one asset on one day), then `terms` (the same rare words, e.g.
+   "Tram to finish Top 3 of BBNaija Season 11" and "A female housemate to win Big Brother Naija Season 11").
+   Same-venue markets cluster exactly like cross-venue ones. A different season, year, kind of subject or
+   a close date more than 90 days apart is a hard conflict. Events are capped at 60 markets (300 for a
+   venue's own grouping).
+3. **Assist** (optional): markets the rules left alone that resemble something are put to Claude in batches
+   (`ANTHROPIC_API_KEY`; `claude-haiku-4-5`), once each, cached in memory and Postgres
+   (`market_subjects`). Its answers are validated against the same hard conflicts. No key, or a failed
+   call, and the rules' graph stands.
+4. **Assemble**: title (a match is "A vs B", a price event "Asset · date", a model-grouped event its
+   headline, else shared words or the venue's own title as a headline), the best member image, category,
+   tags, dates, volume, rating. Ids are hashes of the cluster key, stable while its markets are.
 
 ## Positions, claims and sells
 
@@ -85,7 +79,7 @@ invokes is Jupiter's issuer program (`2sVcg2dBSUzXkmdZ8M5cp1LbnzDrWJmr6hktkHwB8n
 docs) or one of the common supporting programs, and it contains no top-level token transfer, delegate approval,
 authority change or account reassignment. SOL may move only in rent-sized amounts (at most 5,000,000
 lamports per System instruction), the same bound the web client enforces. A refusal is logged at error level with the reason. If
-Jupiter starts using another program, add it with `JUPITER_EXTRA_PROGRAMS` (comma-separated) rather than
+Jupiter starts using another program, add it to `ISSUER_PROGRAM`'s allowlist in `services/jupiter/service.rs` rather than
 loosening the check. **This has not yet been run against a live Jupiter order.** Before enabling execution,
 build one with `scripts/dry-run-order.sh` and confirm it passes; the guard fails closed, so a wrong
 assumption shows up as a refused build, not a bad transaction. It cannot prove Jupiter's own program is
@@ -109,7 +103,7 @@ on `code`; `error` is for display and its wording may change. Codes are additive
 | `NOT_FOUND`, `MARKET_NOT_FOUND` | It does not exist | Stop |
 | `UNKNOWN_VENUE` | No such venue is enabled | Stop |
 | `UNSUPPORTED` | The venue does not offer this action | Hide the action |
-| `EXECUTION_DISABLED`, `MARKET_CREATION_DISABLED` | Switched off on this deployment | Show trading as unavailable |
+| `EXECUTION_DISABLED`, `MARKET_CREATION_DISABLED` | `MODE=read` on this deployment | Show trading as unavailable |
 | `PRICE_MOVED` | Below the caller's `min_shares_out` | Re-quote, ask the user again |
 | `QUOTE_STALE` | The venue's quote expired or its curve moved past the tolerance | Re-quote |
 | `NO_LIQUIDITY` | No depth at this size | Ask for less |
@@ -125,17 +119,12 @@ on `code`; `error` is for display and its wording may change. Codes are additive
 names its own failure (`QUOTE_EXPIRED`, `NOT_CLAIMABLE`, `TX_FEE_MISMATCH`), that word is passed
 through verbatim as `venue_code`.
 
-## CORS and rate limits
+## CORS
 
-`CORS_ORIGIN` takes one origin or a comma-separated list, each exactly `scheme://host[:port]`. A
-wildcard, a path or a trailing slash is refused at startup. Methods are `GET`, `POST`, `OPTIONS` only;
-`Retry-After` and `ETag` are exposed so a browser client can read them.
-
-Requests cost tokens from a per-IP bucket: memory reads 1, an action status poll 2, and anything that
-calls a venue (`POST /v1/route`, `/live`, `POST /execution/*`, `/v1/positions`) 10. Behind a proxy set
-`TRUST_FORWARDED_FOR=true` and `TRUSTED_PROXY_HOPS` to the number of proxies that append to
-`X-Forwarded-For`. The client address is that many entries from the **right**; the leftmost entry is
-client-supplied and is never used.
+`CORS_ORIGIN` is optional. Unset allows any origin (the API holds no cookies or credentials). Set it to one
+origin or a comma-separated list, each exactly `scheme://host[:port]`; a wildcard, path or trailing slash is
+refused at startup. Methods are `GET`, `POST`, `OPTIONS`; `Retry-After` and `ETag` are exposed. Per-IP rate
+limiting exists in the code but is switched off for the MVP.
 
 ## Market times
 
@@ -158,9 +147,9 @@ markets - "closes after a winner is declared", 28 of 1063 on a live sports page)
 excluded from a bounded window rather than padding results with markets we can't prove belong
 there.
 
-The earlier `/markets`, `/categories`, `/events`, `/events/{id}/markets` and `/find-best-market`
-routes, and the title-similarity graph behind them, were removed. `/v1` replaces each of them;
-`POST /v1/route` replaces `/find-best-market` and takes a `question_id` rather than an `event_id`.
+The earlier `/markets`, `/categories`, `/events`, `/events/{id}/markets`, `/find-best-market` and
+`POST /v1/route` routes were removed: `/v1` is the only discovery API, and an event page compares its
+markets directly.
 
 ## Venues
 
@@ -254,27 +243,9 @@ sqlx migrate run     # apply migrations as an explicit deploy step, not at start
 
 ## Operator routes
 
-`POST /refresh`, `GET /metrics` and the raw venue proxy `GET /venues/{venue_id}/raw/{path}` require
-an `X-Admin-Token` header matching `ADMIN_TOKEN`. **They fail closed**: with `ADMIN_TOKEN` unset,
-they refuse every request. The raw proxy is further limited to each venue's read-only catalog
-paths (Jupiter `events`, `markets`, `orderbook`; Panta `markets`), rejects dot segments, and
-returns the venue's own status code.
-
-## Protecting the public routes
-
-- **Rate limit:** each client IP gets `RATE_LIMIT_PER_MINUTE` tokens a minute (default 300, `0`
-  disables). A request that takes live quotes (`POST /v1/route`) or reads a market live costs 10. Over the limit is a `429` with
-  `Retry-After`. Behind a proxy that overwrites `X-Forwarded-For`, set `TRUST_FORWARDED_FOR=true`; behind one
-  that does not, every client shares the proxy's address and one bucket.
-- **Redaction:** venue and RPC error text is scrubbed of URLs (`errors/adapter_error.rs`) before it
-  reaches logs, `/venues/health` or a response, because a private RPC URL carries its key.
-- **Slippage floor:** a buy may carry `min_shares_out`. The build is refused when the venue's
-  build-time preview is below it, or gives no share count to compare. It is a build-time check,
-  not an on-chain bound.
-- **Timeout:** any request running longer than `REQUEST_TIMEOUT_SECS` (default 45) gets a `408`.
-- **Venue health:** a venue's `429` is backpressure, not an outage — it never counts toward the
-  failure streak that takes a venue out of routing.
-- **Shutdown:** `SIGTERM`/Ctrl-C drains in-flight requests before exit.
+`POST /refresh`, `GET /metrics` and `/admin/matches*` are open in the MVP. A refresh is a multi-minute fan-out
+but cannot overlap itself, so repeated calls are harmless. Put them behind your own proxy if the service is
+exposed publicly.
 
 ## Deploying
 
@@ -285,8 +256,7 @@ docker run --env-file aggregator/.env -p 8080:8080 metis-api
 ```
 
 - **Configuration** is environment only; the image bakes in no `.env`. `.env.example` lists every
-  variable. `ADMIN_TOKEN` unset disables the operator routes, and `EXECUTION_ENABLED` /
-  `MARKET_CREATION_ENABLED` are off unless exactly `true`.
+  variable (a handful: venue keys, `MODE`, `PORT`, optional `CORS_ORIGIN`, `DATABASE_URL`, `PANTA_RPC_URL`).
 - **Region:** Jupiter blocks US and South Korea IPs, so run somewhere else.
 - **Postgres** is optional (unset means in-memory, nothing survives a restart). Use the direct
   connection, not a transaction-mode pooler. Size `DATABASE_POOL_SIZE` so instances × pool stays

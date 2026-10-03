@@ -87,7 +87,7 @@ async fn positions_page(
 ) -> Result<(Vec<JupPosition>, bool), AdapterError> {
     let response = client
         .get(venue_url(base_url, &["positions"])?)
-        .header("x-api-key", api_key)
+        .headers(crate::utils::http::api_key_headers("x-api-key", api_key))
         .query(&[
             ("ownerPubkey", wallet.to_string()),
             ("start", start.to_string()),
@@ -153,7 +153,7 @@ pub async fn build_claim(
 
     let response = client
         .post(venue_url(base_url, &["positions", position, "claim"])?)
-        .header("x-api-key", api_key)
+        .headers(crate::utils::http::api_key_headers("x-api-key", api_key))
         .json(&serde_json::json!({ "ownerPubkey": owner }))
         .send()
         .await?;
@@ -192,7 +192,7 @@ pub async fn build_sell(
 ) -> Result<UnsignedTransaction, AdapterError> {
     let response = client
         .delete(venue_url(base_url, &["positions", &intent.venue_ref])?)
-        .header("x-api-key", api_key)
+        .headers(crate::utils::http::api_key_headers("x-api-key", api_key))
         .json(&serde_json::json!({ "ownerPubkey": intent.wallet }))
         .send()
         .await?;

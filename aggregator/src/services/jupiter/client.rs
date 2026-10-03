@@ -9,7 +9,7 @@ use crate::models::venue::jupiter::{
     JupEvent, JupEventsResponse, JupMarket, JupOrderbookResponse, micro_usd_to_decimal_string,
 };
 use crate::models::venue::{Category, ListParams, MarketPage, VenueEntity, VenueEvent, VenueMarket};
-use crate::utils::http::{parse_json_with_diagnostics, venue_url, venue_url_for_path};
+use crate::utils::http::{parse_json_with_diagnostics, venue_url};
 
 /// How many events to request per page - Jupiter's pagination is index-range based
 /// (`start`/`end`), not a page-size parameter, so this is just the width of range we ask for.
@@ -134,7 +134,7 @@ pub async fn list_markets(
 
     let response = client
         .get(venue_url(base_url, &["events"])?)
-        .header("x-api-key", api_key)
+        .headers(crate::utils::http::api_key_headers("x-api-key", api_key))
         .query(&query)
         .send()
         .await?
@@ -165,7 +165,7 @@ pub async fn get_market(
 ) -> Result<VenueMarket, AdapterError> {
     let response = client
         .get(venue_url(base_url, &["markets", venue_market_id])?)
-        .header("x-api-key", api_key)
+        .headers(crate::utils::http::api_key_headers("x-api-key", api_key))
         .send()
         .await?;
 
@@ -186,6 +186,7 @@ pub async fn get_market(
 
 /// Calls Jupiter's `GET /orderbook/{id}` and returns the raw book, both sides. Which side to
 /// walk and how is a trading decision - that's `service.rs`'s job, not this one's.
+#[allow(dead_code)]
 pub async fn get_orderbook(
     client: &reqwest::Client,
     base_url: &str,
@@ -194,35 +195,13 @@ pub async fn get_orderbook(
 ) -> Result<JupOrderbookResponse, AdapterError> {
     let response = client
         .get(venue_url(base_url, &["orderbook", venue_market_id])?)
-        .header("x-api-key", api_key)
+        .headers(crate::utils::http::api_key_headers("x-api-key", api_key))
         .send()
         .await?
         .error_for_status()
         .map_err(|e| AdapterError::Venue(e.to_string()))?;
 
     parse_json_with_diagnostics(response, "jupiter get_orderbook").await.map_err(AdapterError::Parse)
-}
-
-/// Raw GET passthrough — returns the venue's response body verbatim.
-///
-/// No parsing and no reshaping: the point is to see exactly what the venue sends, including the
-/// fields we normally drop and the ones that arrive empty. Errors are returned as the body too,
-/// since a venue's error text is usually the most informative thing about it.
-pub async fn raw_get(
-    client: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
-    path: &str,
-    query: &[(String, String)],
-) -> Result<(u16, String), AdapterError> {
-    let response = client
-        .get(venue_url_for_path(base_url, path)?)
-        .header("x-api-key", api_key)
-        .query(query)
-        .send()
-        .await?;
-    let status = response.status().as_u16();
-    Ok((status, response.text().await.map_err(AdapterError::Http)?))
 }
 
 #[cfg(test)]

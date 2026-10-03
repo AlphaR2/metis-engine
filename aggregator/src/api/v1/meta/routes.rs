@@ -53,9 +53,9 @@ pub struct ReadyResponse {
     pub stale_venues: Vec<String>,
 }
 
-/// Readiness check: whether this instance has a catalog to serve. **503 until the first venue
-/// catalog is held** (from a warm start out of Postgres or a completed refresh), so a load balancer
-/// does not send traffic to an instance that would answer every list with an empty page. A stale
+/// Readiness check: whether this instance has events to serve. **503 until the first venue catalog
+/// is held and the event graph built from it** (from a warm start out of Postgres or a completed
+/// refresh), so a load balancer or a UI does not meet an empty board while the graph is still building. A stale
 /// venue does not make it unready: serving the last good catalog is the designed behaviour.
 #[utoipa::path(get, path = "/ready", tag = "meta", responses((status = 200, body = ReadyResponse), (status = 503, body = ReadyResponse)))]
 pub async fn ready(State(state): State<AppState>) -> (StatusCode, Json<ReadyResponse>) {
@@ -65,7 +65,8 @@ pub async fn ready(State(state): State<AppState>) -> (StatusCode, Json<ReadyResp
         store.bucket_statuses().into_iter().filter(|b| b.stale).map(|b| b.venue_id).collect();
     stale_venues.sort();
     stale_venues.dedup();
-    let ready = markets > 0;
+    let built = state.aggregator.events.read().await.built_at > 0;
+    let ready = markets > 0 && built;
     let code = if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
     (code, Json(ReadyResponse { ready, markets, stale_venues }))
 }

@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 use crate::errors::AdapterError;
 use crate::models::venue::panta::{PantaCategoriesResponse, PantaListResponse, PantaMarketRow, PantaQuoteResponse};
 use crate::models::venue::{ListParams, VenueQuote};
-use crate::utils::http::{parse_json_with_diagnostics, venue_url_dir, venue_url_for_path};
+use crate::utils::http::{parse_json_with_diagnostics, venue_url_dir};
 
 /// Panta's documented max page size (default is 20 if unset) - requesting the max cuts the number
 /// of round trips (and thus total refresh time) roughly 2.5x for the same catalog.
@@ -96,6 +96,7 @@ pub async fn get_market_row(
 }
 
 /// Calls Panta's `POST /primaryorderquote/` for a fill estimate.
+#[allow(dead_code)]
 pub async fn quote(
     client: &reqwest::Client,
     base_url: &str,
@@ -141,24 +142,3 @@ pub async fn quote(
     })
 }
 
-/// Raw GET passthrough — returns the venue's response body verbatim.
-///
-/// No parsing and no reshaping: the point is to see exactly what the venue sends, including the
-/// fields we normally drop and the ones that arrive empty. Errors are returned as the body too,
-/// since a venue's error text is usually the most informative thing about it.
-pub async fn raw_get(
-    client: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
-    path: &str,
-    query: &[(String, String)],
-) -> Result<(u16, String), AdapterError> {
-    let response = client
-        .get(venue_url_for_path(base_url, path)?)
-        .header("X-Api-Key", api_key)
-        .query(query)
-        .send()
-        .await?;
-    let status = response.status().as_u16();
-    Ok((status, response.text().await.map_err(AdapterError::Http)?))
-}

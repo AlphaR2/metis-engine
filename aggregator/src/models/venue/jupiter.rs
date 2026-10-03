@@ -167,6 +167,7 @@ pub const FILTER_CATEGORIES: [&str; 11] = [
 /// `GET /orderbook/{id}` response - only the decimal-priced arrays are used; the integer-cents
 /// `yes`/`no` arrays are redundant with these (same data, coarser precision) and skipped.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct JupOrderbookResponse {
     /// `[price_decimal_string, quantity]` pairs - quantity is a raw JSON number (may be
     /// fractional), unlike the price, which is a decimal string.

@@ -56,7 +56,7 @@ async fn assert_trading_live(
 ) -> Result<(), AdapterError> {
     let response = client
         .get(format!("{base_url}/trading-status"))
-        .header("x-api-key", api_key)
+        .headers(crate::utils::http::api_key_headers("x-api-key", api_key))
         .send()
         .await?
         .error_for_status()
@@ -163,7 +163,7 @@ pub async fn build_buy(
 
     let response = client
         .post(format!("{base_url}/orders"))
-        .header("x-api-key", api_key)
+        .headers(crate::utils::http::api_key_headers("x-api-key", api_key))
         .json(&body)
         .send()
         .await?
@@ -214,7 +214,7 @@ pub async fn order_status(
 ) -> Result<ConfirmOutcome, AdapterError> {
     let response = client
         .get(crate::utils::http::venue_url(base_url, &["orders", "status", order_pubkey])?)
-        .header("x-api-key", api_key)
+        .headers(crate::utils::http::api_key_headers("x-api-key", api_key))
         .send()
         .await?;
 
