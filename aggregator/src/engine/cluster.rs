@@ -16,7 +16,7 @@
 //!
 //! Pure and deterministic: the same profiles and hints always give the same clusters.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use rust_decimal::Decimal;
 
@@ -27,6 +27,10 @@ use super::subject::{Profile, conflicts};
 /// `VENUE_EVENT_CAP`: some (the largest company by market cap) really do list hundreds of options.
 pub const MAX_MEMBERS: usize = 60;
 pub const VENUE_EVENT_CAP: usize = 300;
+/// Extra room for a cluster that is full, when the market joining it is on a venue it has none of.
+/// Pairing a market with its counterpart on another venue is the point of the aggregator, so a
+/// busy event must not shut out the one market that would make it a comparison.
+pub const CROSS_VENUE_SLACK: usize = 20;
 
 /// A term in more than this share of all markets says nothing about a subject.
 const GENERIC_SHARE: f64 = 0.05;
@@ -153,6 +157,11 @@ impl Unit {
     }
 }
 
+/// The venue a profile's market is on - the part of its key before the first colon.
+fn venue_of(profile: &Profile) -> &str {
+    profile.key.split(':').next().unwrap_or("")
+}
+
 fn seed_units(profiles: &[Profile]) -> Vec<Unit> {
     let n = profiles.len();
     let mut dsu = Dsu::new(n);
@@ -178,22 +187,32 @@ fn seed_units(profiles: &[Profile]) -> Vec<Unit> {
     // merged only while the result stays a readable event: joining one market of a venue event pulls
     // in the whole of it, so unchecked they chain unrelated events into one.
     let mut size: HashMap<usize, usize> = HashMap::new();
-    for i in 0..n {
-        *size.entry(dsu.find(i)).or_default() += 1;
+    let mut venues: HashMap<usize, BTreeSet<&str>> = HashMap::new();
+    for (i, profile) in profiles.iter().enumerate() {
+        let root = dsu.find(i);
+        *size.entry(root).or_default() += 1;
+        venues.entry(root).or_default().insert(venue_of(profile));
     }
     for key in keys.iter().filter(|k| !k.starts_with("ve:")) {
         let members = &by_key[*key];
         let Some(&first) = members.first() else { continue };
-        for &m in &members[1..] {
+        // Markets from venues the cluster lacks go first, so when it fills up it is the repeats
+        // from a venue it already has that are left out, not the cross-venue counterpart.
+        let mut order: Vec<usize> = members[1..].to_vec();
+        order.sort_by_key(|&m| venues.get(&dsu.find(first)).is_some_and(|v| v.contains(venue_of(&profiles[m]))));
+        for m in order {
             let (r0, r) = (dsu.find(first), dsu.find(m));
             if r0 == r {
                 continue;
             }
             let combined = size[&r0] + size[&r];
-            if combined <= MAX_MEMBERS {
+            let new_venue = !venues[&r].is_subset(&venues[&r0]);
+            if combined <= MAX_MEMBERS || (new_venue && combined <= MAX_MEMBERS + CROSS_VENUE_SLACK) {
                 dsu.union(r0, r);
                 let root = dsu.find(r0);
                 size.insert(root, combined);
+                let merged: BTreeSet<&str> = venues[&r0].union(&venues[&r]).copied().collect();
+                venues.insert(root, merged);
             }
         }
     }
@@ -308,6 +327,25 @@ fn units_conflict(a: &Unit, b: &Unit, profiles: &[Profile]) -> bool {
     a.members.iter().any(|&m| conflicts(&profiles[m], lb)) || b.members.iter().any(|&m| conflicts(la, &profiles[m]))
 }
 
+/// Words a lone market must share with a single member of another venue's cluster to be taken as
+/// the same bet. Stricter than joining on the cluster's core: it stands in for the core.
+const MIN_MEMBER_SHARED_TERMS: usize = 3;
+
+/// The member of `host` that `unit` (one market) resembles most, with the shared words and the
+/// share of `unit`'s distinctive weight they carry; `None` if no member clears the bar.
+fn closest_member(unit: &Unit, host: &Unit, own: &BTreeSet<String>, own_mass: f64, profiles: &[Profile], stats: &TermStats) -> Option<(f64, Vec<String>)> {
+    let lone = &profiles[unit.members[0]];
+    host.members
+        .iter()
+        .filter(|&&m| !conflicts(lone, &profiles[m]))
+        .filter_map(|&m| {
+            let shared: Vec<String> = own.iter().filter(|t| profiles[m].terms.contains(*t)).cloned().collect();
+            let coverage = mass(&shared, stats) / own_mass;
+            (shared.len() >= MIN_MEMBER_SHARED_TERMS && coverage >= MIN_COVERAGE).then_some((coverage, shared))
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+}
+
 fn merge_by_terms(mut units: Vec<Unit>, profiles: &[Profile]) -> Vec<Unit> {
     let stats = term_stats(profiles);
     // Most-traded first: the busiest unit anchors a cluster and smaller ones join it.
@@ -329,16 +367,28 @@ fn merge_by_terms(mut units: Vec<Unit>, profiles: &[Profile]) -> Vec<Unit> {
         }
         let mut best: Option<(usize, f64, Vec<String>)> = None;
         if own_mass > 0.0 {
+            // A single market from a venue the cluster doesn't list yet is the cross-venue case.
+            let lone_venue = (unit.members.len() == 1).then(|| venue_of(&profiles[unit.members[0]]));
             for c in candidates {
-                if accepted[c].members.len() + unit.members.len() > MAX_MEMBERS {
+                let new_venue = lone_venue.is_some_and(|v| accepted[c].members.iter().all(|&m| venue_of(&profiles[m]) != v));
+                let room = MAX_MEMBERS + if new_venue { CROSS_VENUE_SLACK } else { 0 };
+                if accepted[c].members.len() + unit.members.len() > room {
                     continue;
                 }
                 let shared: Vec<String> = own.intersection(&cores[c]).cloned().collect();
-                if shared.len() < MIN_SHARED_TERMS {
-                    continue;
-                }
-                let coverage = mass(&shared, &stats) / own_mass;
-                if coverage < MIN_COVERAGE || units_conflict(&unit, &accepted[c], profiles) {
+                let by_core = (shared.len() >= MIN_SHARED_TERMS).then(|| mass(&shared, &stats) / own_mass).filter(|cov| *cov >= MIN_COVERAGE);
+                let (coverage, shared) = match by_core {
+                    Some(coverage) => (coverage, shared),
+                    // The cluster's core is only what most of its members share, so the words that
+                    // name one bet ("Marco Rubio" inside "Republican Presidential Nominee") are
+                    // not in it. A cross-venue market may instead match one member closely.
+                    None if new_venue => match closest_member(&unit, &accepted[c], &own, own_mass, profiles, &stats) {
+                        Some(hit) => hit,
+                        None => continue,
+                    },
+                    None => continue,
+                };
+                if units_conflict(&unit, &accepted[c], profiles) {
                     continue;
                 }
                 if best.as_ref().is_none_or(|(_, s, _)| coverage > *s) {
@@ -393,8 +443,25 @@ pub fn cluster(profiles: &[Profile], hints: &HashMap<String, Hint>) -> Vec<Clust
         .into_iter()
         .map(|u| Cluster { key: u.key, members: u.members, reason: u.reason, detail: u.detail, confidence: u.confidence, title: u.title })
         .collect();
-    clusters.sort_by(|a, b| a.key.cmp(&b.key));
+    clusters.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| profiles[a.members[0]].key.cmp(&profiles[b.members[0]].key)));
+    unique_keys(&mut clusters, profiles);
     clusters
+}
+
+/// An event id is a hash of its cluster key, so two clusters must never share one. They can: a seed
+/// key such as "the same asset on the same day" is shared by every market it matches, but the size
+/// cap can split those into several clusters, and each is named after that one key.
+///
+/// The first cluster in order (its leader's key breaks ties, so this is deterministic) keeps the
+/// key - and so its id stays what it was; the others are suffixed with their own leader's key.
+fn unique_keys(clusters: &mut [Cluster], profiles: &[Profile]) {
+    let mut seen: HashSet<String> = HashSet::new();
+    for cluster in clusters.iter_mut() {
+        if !seen.insert(cluster.key.clone()) {
+            cluster.key = format!("{}#{}", cluster.key, profiles[cluster.members[0]].key);
+            seen.insert(cluster.key.clone());
+        }
+    }
 }
 
 /// A lone market a model may be asked about, with the clusters it weakly resembles.
@@ -659,5 +726,84 @@ mod tests {
             v
         };
         assert_eq!(shape(&pa, &a), shape(&pb, &b));
+    }
+
+    #[test]
+    fn clusters_never_share_a_key_so_event_ids_stay_unique() {
+        let markets = [
+            market("jupiter", "a", "Bitcoin above 90,000 on Dec 31?", None, 9),
+            market("jupiter", "b", "Bitcoin above 95,000 on Dec 31?", None, 5),
+            market("panta", "c", "Will bitcoin hit 100,000 by Dec 31?", None, 1),
+        ];
+        let dictionary = Dictionary::seeded();
+        let profiles: Vec<Profile> = markets.iter().map(|m| profile(m, &dictionary)).collect();
+        // The size cap can split one shared seed key into several clusters; model that directly.
+        let shared = |i: usize| Cluster {
+            key: "px:btc:20000".into(),
+            members: vec![i],
+            reason: Reason::Price,
+            detail: String::new(),
+            confidence: 0.9,
+            title: None,
+        };
+        let mut clusters = vec![shared(2), shared(0), shared(1)];
+        clusters.sort_by(|a, b| profiles[a.members[0]].key.cmp(&profiles[b.members[0]].key));
+        unique_keys(&mut clusters, &profiles);
+        let keys: HashSet<&String> = clusters.iter().map(|c| &c.key).collect();
+        assert_eq!(keys.len(), 3, "{:?}", clusters.iter().map(|c| &c.key).collect::<Vec<_>>());
+        assert_eq!(clusters[0].key, "px:btc:20000", "the first keeps the original key, so its id is unchanged");
+    }
+
+    #[test]
+    fn a_full_event_still_takes_the_counterpart_from_another_venue() {
+        let day = NOW + 5 * 86_400;
+        let mut markets: Vec<VenueMarket> = (0..MAX_MEMBERS)
+            .map(|i| {
+                // One venue-grouped event, already at the cap before anything else is considered.
+                let mut m = market("jupiter", &format!("j{i}"), &format!("Bitcoin above {} on Dec 31?", 1000 + i), Some(("ev", "Bitcoin · Dec 31, 2026")), 5);
+                m.category = Category::from("crypto");
+                m.close_time = day;
+                m
+            })
+            .collect();
+        let mut p = market("panta", "p", "Will bitcoin hit 100,000 by Dec 31?", None, 1);
+        p.category = Category::from("crypto");
+        p.close_time = day;
+        markets.push(p);
+        let (profiles, clusters) = run(&markets, &HashMap::new());
+        let with_panta = clusters.iter().find(|c| keys_of(&profiles, c).contains(&"panta:p".to_string())).unwrap();
+        assert!(with_panta.members.len() > 1, "panta's market joined the full jupiter event: {} members", with_panta.members.len());
+    }
+
+    #[test]
+    fn a_lone_market_joins_the_event_that_holds_its_counterpart_on_another_venue() {
+        // Jupiter lists one bet per candidate under the venue's own event; Panta's market names
+        // one of them in its own words ("nomination", "Party"). The event's shared words alone
+        // don't cover "Marco Rubio", so it has to match the one member.
+        let jup = |id: &str, who: &str| {
+            // JD Vance is the most traded, so he leads the event and Rubio's words are not in its core.
+            let volume = if who == "JD Vance" { 500 } else { 50 };
+            let mut m = market("jupiter", id, who, Some(("rep28", "Republican Presidential Nominee 2028")), volume);
+            m.close_time = NOW + 400 * 86_400;
+            m
+        };
+        let mut markets: Vec<VenueMarket> = ["Marco Rubio", "JD Vance", "Donald Trump Jr", "Ron DeSantis", "Nikki Haley", "Tim Scott"]
+            .iter()
+            .enumerate()
+            .map(|(i, who)| jup(&format!("j{i}"), who))
+            .collect();
+        let mut panta = market("panta", "p", "Marco Rubio to win the 2028 Presidential nomination of the Republican Party", None, 1);
+        panta.close_time = NOW + 395 * 86_400;
+        markets.push(panta);
+        // A different person's bet must not ride in on the shared words.
+        let mut other = market("panta", "q", "Gavin Newsom to win the 2028 Presidential nomination of the Democratic Party", None, 1);
+        other.close_time = NOW + 395 * 86_400;
+        markets.push(other);
+        markets.extend(filler(30));
+        let (profiles, clusters) = run(&markets, &HashMap::new());
+        let with = |k: &str| clusters.iter().find(|c| keys_of(&profiles, c).contains(&k.to_string())).unwrap();
+        let rubio = keys_of(&profiles, with("panta:p"));
+        assert!(rubio.contains(&"jupiter:j0".to_string()), "joined the republican event: {rubio:?}");
+        assert!(!keys_of(&profiles, with("panta:q")).contains(&"jupiter:j0".to_string()), "the democratic bet stays out");
     }
 }

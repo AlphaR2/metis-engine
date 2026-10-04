@@ -232,10 +232,45 @@ pub struct JupCreateOrderRequest {
     pub deposit_mint: Option<String>,
 }
 
+/// An integer Jupiter may send as a JSON number or as a string of digits ("210000"), or as null.
+///
+/// An order response mixes the two - `contractsMicro` is a string, `maxBuyPriceUsd` can be either -
+/// and a strict `i64` turns the first string into a refused order. Read both, so a formatting quirk
+/// on Jupiter's side cannot block a build that is otherwise fine.
+fn lenient_i64<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<i64>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Number {
+        Int(i64),
+        Float(f64),
+        Text(String),
+    }
+    match Option::<Number>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Number::Int(n)) => Ok(Some(n)),
+        Some(Number::Float(f)) if f.is_finite() => Ok(Some(f as i64)),
+        Some(Number::Float(f)) => Err(serde::de::Error::custom(format!("{f} is not a finite number"))),
+        Some(Number::Text(t)) => {
+            let t = t.trim();
+            if t.is_empty() {
+                return Ok(None);
+            }
+            t.parse::<i64>()
+                .or_else(|_| t.parse::<f64>().map(|f| f as i64))
+                .map(Some)
+                .map_err(|_| serde::de::Error::custom(format!("'{t}' is not a number")))
+        }
+    }
+}
+
+fn lenient_u64<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<u64>, D::Error> {
+    Ok(lenient_i64(deserializer)?.and_then(|n| u64::try_from(n).ok()))
+}
+
 /// Blockhash metadata from an order build.
 #[derive(Debug, Deserialize)]
 pub struct JupTxMeta {
-    #[serde(rename = "lastValidBlockHeight", default)]
+    #[serde(rename = "lastValidBlockHeight", default, deserialize_with = "lenient_u64")]
     pub last_valid_block_height: Option<u64>,
 }
 
@@ -246,44 +281,47 @@ pub struct JupTxMeta {
 /// is **Jupiter's** ceiling, not a tolerance the caller chose.
 #[derive(Debug, Deserialize)]
 pub struct JupOrderDetail {
-    #[serde(rename = "orderPubkey")]
-    pub order_pubkey: String,
+    /// Null when Jupiter priced the order but could not build it (see `JupCreateOrderResponse`).
+    #[serde(rename = "orderPubkey", default)]
+    pub order_pubkey: Option<String>,
     /// Contracts acquired, as a decimal string.
     #[serde(rename = "contractsDecimal", default)]
     pub contracts_decimal: Option<String>,
     /// The worst per-contract price this order can fill at, micro-USD.
-    #[serde(rename = "maxBuyPriceUsd", default)]
+    #[serde(rename = "maxBuyPriceUsd", default, deserialize_with = "lenient_i64")]
     pub max_buy_price_usd: Option<i64>,
     /// What the order costs in total, micro-USD.
-    #[serde(rename = "orderCostUsd", default)]
+    #[serde(rename = "orderCostUsd", default, deserialize_with = "lenient_i64")]
     pub order_cost_usd: Option<i64>,
-    #[serde(rename = "estimatedProtocolFeeUsd", default)]
+    #[serde(rename = "estimatedProtocolFeeUsd", default, deserialize_with = "lenient_i64")]
     pub estimated_protocol_fee_usd: Option<i64>,
-    #[serde(rename = "estimatedVenueFeeUsd", default)]
+    #[serde(rename = "estimatedVenueFeeUsd", default, deserialize_with = "lenient_i64")]
     pub estimated_venue_fee_usd: Option<i64>,
     /// The sum of the two above. Captured so the response shape is complete, but not shown:
     /// the breakdown is itemised, and a total line beside its own parts is noise.
     #[allow(dead_code)]
-    #[serde(rename = "estimatedTotalFeeUsd", default)]
+    #[serde(rename = "estimatedTotalFeeUsd", default, deserialize_with = "lenient_i64")]
     pub estimated_total_fee_usd: Option<i64>,
     /// Expected slippage, and the ceiling Jupiter will tolerate, in basis points.
-    #[serde(rename = "slippageBps", default)]
+    #[serde(rename = "slippageBps", default, deserialize_with = "lenient_i64")]
     pub slippage_bps: Option<i64>,
-    #[serde(rename = "maxSlippageBps", default)]
+    #[serde(rename = "maxSlippageBps", default, deserialize_with = "lenient_i64")]
     pub max_slippage_bps: Option<i64>,
     /// The average price the resulting position would carry, micro-USD.
-    #[serde(rename = "newAvgPriceUsd", default)]
+    #[serde(rename = "newAvgPriceUsd", default, deserialize_with = "lenient_i64")]
     pub new_avg_price_usd: Option<i64>,
     /// What the position pays out if it wins, micro-USD.
-    #[serde(rename = "newPayoutUsd", default)]
+    #[serde(rename = "newPayoutUsd", default, deserialize_with = "lenient_i64")]
     pub new_payout_usd: Option<i64>,
 }
 
 /// `POST /orders` response.
 #[derive(Debug, Deserialize)]
 pub struct JupCreateOrderResponse {
-    /// Base64 unsigned transaction.
-    pub transaction: String,
+    /// Base64 unsigned transaction. Null when Jupiter priced the order but built nothing - seen when
+    /// the wallet cannot fund it - in which case the order pubkey is null too.
+    #[serde(default)]
+    pub transaction: Option<String>,
     #[serde(rename = "txMeta", default)]
     pub tx_meta: Option<JupTxMeta>,
     #[serde(rename = "requiredSigners", default)]
@@ -470,5 +508,35 @@ mod position_tests {
     #[test]
     fn a_position_with_no_optional_fields_still_parses() {
         assert!(serde_json::from_str::<JupPosition>(r#"{"pubkey":"P","marketId":"M"}"#).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod order_response_tests {
+    use super::*;
+
+    #[test]
+    fn an_order_whose_numbers_are_sometimes_strings_still_parses() {
+        // As Jupiter sent it: a real transaction, with some micro-USD fields as strings ("210000")
+        // and others as numbers, block height as a string.
+        let body = r#"{"transaction":"AAAA","txMeta":{"lastValidBlockHeight":"431328938"},
+            "requiredSigners":["W"],"isGasless":false,
+            "order":{"orderPubkey":"O1","contractsDecimal":"4.7","maxBuyPriceUsd":"210000","orderCostUsd":2000000,
+                     "estimatedProtocolFeeUsd":"0","estimatedVenueFeeUsd":null,"slippageBps":"15","newAvgPriceUsd":425000.0,
+                     "newPayoutUsd":""}}"#;
+        let built: JupCreateOrderResponse = serde_json::from_str(body).expect("mixed numbers must parse");
+        assert_eq!(built.order.max_buy_price_usd, Some(210_000));
+        assert_eq!(built.order.order_cost_usd, Some(2_000_000));
+        assert_eq!(built.order.estimated_venue_fee_usd, None);
+        assert_eq!(built.order.slippage_bps, Some(15));
+        assert_eq!(built.order.new_avg_price_usd, Some(425_000));
+        assert_eq!(built.order.new_payout_usd, None, "an empty string is no value, not an error");
+        assert_eq!(built.tx_meta.unwrap().last_valid_block_height, Some(431_328_938));
+    }
+
+    #[test]
+    fn a_value_that_is_not_a_number_is_still_an_error() {
+        let body = r#"{"transaction":"AAAA","order":{"orderPubkey":"O1","maxBuyPriceUsd":"abc"}}"#;
+        assert!(serde_json::from_str::<JupCreateOrderResponse>(body).is_err());
     }
 }

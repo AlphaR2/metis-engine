@@ -200,6 +200,7 @@ pub async fn build_sell(
     let built: JupCreateOrderResponse =
         parse_json_with_diagnostics(response, "jupiter sell").await.map_err(AdapterError::Parse)?;
 
+    let (transaction, order_pubkey) = super::execution::require_built(&built, "sell")?;
     let signers = if built.required_signers.is_empty() { vec![intent.wallet.clone()] } else { built.required_signers.clone() };
     let mut cost = super::execution::cost_from(&built.order, Decimal::ZERO);
     // A sell pays the wallet, so nothing leaves it beyond fees taken from proceeds. Jupiter's
@@ -209,8 +210,8 @@ pub async fn build_sell(
     Ok(UnsignedTransaction {
         venue_id: "jupiter".to_string(),
         kind: IntentKind::SellShares,
-        transaction: built.transaction,
-        venue_ref: built.order.order_pubkey.clone(),
+        transaction,
+        venue_ref: order_pubkey,
         expires_at: now_unix() + ASSUMED_BLOCKHASH_SECS,
         required_signers: signers,
         last_valid_block_height: built.tx_meta.as_ref().and_then(|m| m.last_valid_block_height),

@@ -127,6 +127,8 @@ pub struct EventCard {
     pub volume_usdc: Decimal,
     pub venues: Vec<String>,
     pub market_count: usize,
+    /// How many of its markets are also listed, as the same question, on another venue.
+    pub matched_markets: usize,
     /// Our 0-100 rating of the event.
     pub rating: u8,
     /// Why its markets were grouped: `venue_event`, `match`, `price`, `terms`, `ai` or `single`.
@@ -164,6 +166,7 @@ fn card(event: &EventNode) -> EventCard {
         volume_usdc: event.volume_usdc,
         venues: event.venues.clone(),
         market_count: event.market_count,
+        matched_markets: event.matched_markets(),
         rating: event.rating.score,
         grouping: event.grouping.reason.clone(),
         top_markets: event.markets.iter().take(3).map(preview).collect(),
@@ -192,10 +195,16 @@ fn status_filter(raw: Option<&str>) -> Result<Vec<EventStatus>, ApiError> {
     })
 }
 
-/// Sort key for `sort=best`: our event rating (activity, venue coverage, depth), then volume, then
-/// soonest to close.
+/// Sort key for `sort=best`. Cross-venue first: an event on several venues leads, and among those
+/// one with a question another venue also lists leads again. Then our event rating (activity,
+/// venue coverage, depth), volume, and soonest to close.
 fn best_order(a: &EventNode, b: &EventNode) -> std::cmp::Ordering {
-    b.rating.score.cmp(&a.rating.score).then(b.volume_usdc.cmp(&a.volume_usdc)).then(a.close_time.cmp(&b.close_time))
+    (b.venue_count > 1)
+        .cmp(&(a.venue_count > 1))
+        .then((b.matched_markets() > 0).cmp(&(a.matched_markets() > 0)))
+        .then(b.rating.score.cmp(&a.rating.score))
+        .then(b.volume_usdc.cmp(&a.volume_usdc))
+        .then(a.close_time.cmp(&b.close_time))
 }
 
 fn filter_events<'g>(graph: &'g EventGraph, query: &ListEventsQuery, now: i64) -> Result<Vec<&'g EventNode>, ApiError> {

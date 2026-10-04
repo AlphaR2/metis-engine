@@ -21,7 +21,7 @@ const PAGE_SIZE: i64 = 50;
 /// the *outcome* on the market. Keeping just the market is what turned this catalog into a list of
 /// bare labels - "Up", "Down", "160-179", "September 21" - with nothing saying what was being
 /// predicted.
-fn market_to_venue_market(event: Option<&JupEvent>, market: &JupMarket) -> VenueMarket {
+pub(crate) fn market_to_venue_market(event: Option<&JupEvent>, market: &JupMarket) -> VenueMarket {
     let pricing = market.pricing.as_ref();
     // Jupiter has no separate resolved flag - "open" is the only tradeable status observed
     // ("closed" markets confirmed in real data still carry a stale price snapshot, not a live

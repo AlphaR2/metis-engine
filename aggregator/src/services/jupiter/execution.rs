@@ -48,6 +48,21 @@ const MIN_DEPOSIT_USDC: i64 = 5;
 /// the block height is passed through for the frontend, which does have RPC, to resolve exactly.
 const ASSUMED_BLOCKHASH_SECS: i64 = 60;
 
+/// The transaction and order pubkey of a built order, or the caller's problem if Jupiter built none.
+///
+/// Jupiter answers 200 with a priced order but a null transaction and order pubkey when it cannot
+/// build one - in practice a wallet without the USDC for it. That is the caller's to fix, not a
+/// venue outage, so it is a 400 that says what to check, not a retryable parse failure.
+pub(super) fn require_built(built: &JupCreateOrderResponse, what: &str) -> Result<(String, String), AdapterError> {
+    match (&built.transaction, &built.order.order_pubkey) {
+        (Some(tx), Some(order)) if !tx.is_empty() && !order.is_empty() => Ok((tx.clone(), order.clone())),
+        _ => Err(AdapterError::InvalidRequest(format!(
+            "Jupiter priced this {what} but built no transaction. This usually means the wallet cannot fund it: \
+             check it holds enough USDC (and a little SOL for fees) and that the amount is within what it owns."
+        ))),
+    }
+}
+
 /// Checks the venue is accepting orders at all.
 async fn assert_trading_live(
     client: &reqwest::Client,
@@ -173,6 +188,7 @@ pub async fn build_buy(
     let built: JupCreateOrderResponse =
         parse_json_with_diagnostics(response, "jupiter create order").await.map_err(AdapterError::Parse)?;
 
+    let (transaction, order_pubkey) = require_built(&built, "order")?;
     let signers = if built.required_signers.is_empty() {
         vec![intent.wallet.clone()]
     } else {
@@ -182,8 +198,8 @@ pub async fn build_buy(
     Ok(UnsignedTransaction {
         venue_id: "jupiter".to_string(),
         kind: IntentKind::BuyShares,
-        transaction: built.transaction,
-        venue_ref: built.order.order_pubkey.clone(),
+        transaction,
+        venue_ref: order_pubkey,
         expires_at: now_unix() + ASSUMED_BLOCKHASH_SECS,
         required_signers: signers,
         last_valid_block_height: built.tx_meta.as_ref().and_then(|m| m.last_valid_block_height),
@@ -248,7 +264,7 @@ mod tests {
 
     fn detail() -> JupOrderDetail {
         JupOrderDetail {
-            order_pubkey: "Order1".to_string(),
+            order_pubkey: Some("Order1".to_string()),
             contracts_decimal: Some("100".to_string()),
             max_buy_price_usd: Some(520_000),
             order_cost_usd: Some(50_000_000),
@@ -332,5 +348,21 @@ mod tests {
         // It is an outcome, not a stage - the book gave what it had. Treating it as pending would
         // leave a caller polling forever.
         assert_eq!(map_status("partiallyfilled"), ActionStatus::PartiallyFilled);
+    }
+
+    #[test]
+    fn an_order_jupiter_priced_but_could_not_build_is_the_callers_to_fix() {
+        // As Jupiter answers for a wallet that cannot fund the order: priced, but nulls where the
+        // transaction and order pubkey should be.
+        let body = r#"{"transaction":null,"txMeta":null,"externalOrderId":null,"requiredSigners":["W"],"isGasless":false,
+            "order":{"orderPubkey":null,"contractsDecimal":"2370","orderCostUsd":5000000}}"#;
+        let built: JupCreateOrderResponse = serde_json::from_str(body).expect("nulls must parse");
+        let err = require_built(&built, "order").unwrap_err();
+        assert!(matches!(err, AdapterError::InvalidRequest(_)), "a 400, not a retryable outage: {err}");
+        assert!(err.to_string().contains("USDC"), "says what to check: {err}");
+
+        let ok: JupCreateOrderResponse =
+            serde_json::from_str(r#"{"transaction":"AAAA","order":{"orderPubkey":"O1"}}"#).unwrap();
+        assert_eq!(require_built(&ok, "order").unwrap(), ("AAAA".to_string(), "O1".to_string()));
     }
 }

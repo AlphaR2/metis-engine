@@ -298,6 +298,10 @@ pub struct InspectedInstruction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectedTransaction {
     pub num_required_signatures: usize,
+    /// How many of the required signers (the last ones) are read-only.
+    pub num_readonly_signed: usize,
+    /// One 64-byte slot per required signer, as it arrived: all zeros means not yet signed.
+    pub signatures: Vec<Vec<u8>>,
     /// The accounts listed in the message itself. Accounts pulled in through an address lookup
     /// table come after these and are not listed here.
     pub static_keys: Vec<Pubkey>,
@@ -309,7 +313,8 @@ pub struct InspectedTransaction {
 pub fn inspect_transaction(bytes: &[u8]) -> Result<InspectedTransaction, CompileError> {
     let mut r = Reader { bytes, pos: 0 };
     let signature_count = r.shortvec()?;
-    r.take(signature_count.checked_mul(64).ok_or_else(|| CompileError::Malformed("too many signatures".to_string()))?)?;
+    let signature_bytes = r.take(signature_count.checked_mul(64).ok_or_else(|| CompileError::Malformed("too many signatures".to_string()))?)?;
+    let signatures: Vec<Vec<u8>> = signature_bytes.chunks(64).map(<[u8]>::to_vec).collect();
 
     let first = r.u8()?;
     let versioned = first & 0x80 != 0;
@@ -318,7 +323,8 @@ pub fn inspect_transaction(bytes: &[u8]) -> Result<InspectedTransaction, Compile
     }
     // A legacy message has no prefix: its first byte is already the header's signature count.
     let num_required_signatures = if versioned { usize::from(r.u8()?) } else { usize::from(first) };
-    r.take(2)?; // readonly signed, readonly unsigned
+    let num_readonly_signed = usize::from(r.u8()?);
+    r.take(1)?; // readonly unsigned
     if signature_count != num_required_signatures {
         return Err(CompileError::Malformed(format!(
             "{signature_count} signature slots for {num_required_signatures} required signers"
@@ -358,7 +364,7 @@ pub fn inspect_transaction(bytes: &[u8]) -> Result<InspectedTransaction, Compile
     if r.pos != bytes.len() {
         return Err(CompileError::Malformed("bytes left over after the message".to_string()));
     }
-    Ok(InspectedTransaction { num_required_signatures, static_keys, instructions, lookup_tables })
+    Ok(InspectedTransaction { num_required_signatures, num_readonly_signed, signatures, static_keys, instructions, lookup_tables })
 }
 
 /// Token-program instruction tags that move tokens or hand over control of them.
@@ -411,11 +417,24 @@ pub fn verify_venue_transaction(transaction_b64: &str, wallet: &str, allowed: &[
     }
     let tx = inspect_transaction(&bytes)?;
 
-    if tx.num_required_signatures != 1 {
-        return Err(CompileError::WrongSigner(format!("it needs {} signatures, expected only yours", tx.num_required_signatures)));
+    if tx.num_required_signatures == 0 {
+        return Err(CompileError::WrongSigner("it needs no signatures".to_string()));
     }
     if tx.static_keys.first() != Some(&wallet) {
         return Err(CompileError::WrongSigner("its fee payer is not your wallet".to_string()));
+    }
+    // The wallet signs for itself, and only its slot may be left open. A venue may attach its own
+    // co-signature - Jupiter pre-signs a read-only authority account on every order - but only as
+    // a read-only signer that has already signed: that cannot move anything, it is a stamp. A signer
+    // that is writable, or that still needs to sign, is someone the wallet cannot stand in for.
+    let first_readonly = tx.num_required_signatures.saturating_sub(tx.num_readonly_signed);
+    for slot in 1..tx.num_required_signatures {
+        if slot < first_readonly {
+            return Err(CompileError::WrongSigner(format!("it needs a writable signer other than you (account {})", slot + 1)));
+        }
+        if tx.signatures.get(slot).is_none_or(|sig| sig.iter().all(|b| *b == 0)) {
+            return Err(CompileError::WrongSigner(format!("it needs a signature from someone other than you (account {}) that was not provided", slot + 1)));
+        }
     }
     if tx.instructions.is_empty() {
         return Err(CompileError::Empty);
@@ -793,5 +812,55 @@ mod tests {
             verify_venue_transaction(&b64(&bytes), &encode_32(&key(PAYER)), &allowed),
             Err(CompileError::ProgramNotAllowed(_))
         ));
+    }
+
+    /// A legacy transaction with the given signature slots and header, listing `keys` in order, whose
+    /// one instruction calls the last key (a program) with the first two keys as accounts.
+    fn raw_two_signer(slots: [[u8; 64]; 2], readonly_signed: u8, keys: [Pubkey; 3]) -> String {
+        use base64::Engine as _;
+        let mut b = vec![2u8];
+        b.extend_from_slice(&slots[0]);
+        b.extend_from_slice(&slots[1]);
+        b.extend_from_slice(&[2, readonly_signed, 1]); // 2 signers, then the one readonly program
+        b.push(3);
+        for k in keys {
+            b.extend_from_slice(&k);
+        }
+        b.extend_from_slice(&[9u8; 32]); // blockhash
+        b.extend_from_slice(&[1, 2, 2, 0, 1, 1, 7]); // one instruction: program 2, accounts [0, 1], data [7]
+        base64::engine::general_purpose::STANDARD.encode(b)
+    }
+
+    #[test]
+    fn a_venues_readonly_cosigner_that_already_signed_is_accepted() {
+        // Jupiter's orders carry a pre-signed read-only authority beside the wallet's empty slot.
+        let (wallet, authority, program) = (key(1), key(2), key(3));
+        let tx = raw_two_signer([[0u8; 64], [5u8; 64]], 1, [wallet, authority, program]);
+        let allowed = encode_32(&program);
+        assert!(verify_venue_transaction(&tx, &encode_32(&wallet), &[allowed.as_str()]).is_ok());
+    }
+
+    #[test]
+    fn an_extra_signer_that_is_writable_or_unsigned_is_still_refused() {
+        let (wallet, other, program) = (key(1), key(2), key(3));
+        let allowed = encode_32(&program);
+        let check = |tx: String| verify_venue_transaction(&tx, &encode_32(&wallet), &[allowed.as_str()]).unwrap_err().to_string();
+
+        // Not read-only: the venue could be moving that account's funds.
+        let writable = check(raw_two_signer([[0u8; 64], [5u8; 64]], 0, [wallet, other, program]));
+        assert!(writable.contains("writable signer"), "{writable}");
+
+        // Read-only but nobody has signed for it: the wallet cannot.
+        let unsigned = check(raw_two_signer([[0u8; 64], [0u8; 64]], 1, [wallet, other, program]));
+        assert!(unsigned.contains("someone other than you"), "{unsigned}");
+    }
+
+    #[test]
+    fn the_wallet_must_still_be_the_fee_payer_when_a_cosigner_is_present() {
+        let (wallet, authority, program) = (key(1), key(2), key(3));
+        let allowed = encode_32(&program);
+        let tx = raw_two_signer([[5u8; 64], [0u8; 64]], 1, [authority, wallet, program]);
+        let err = verify_venue_transaction(&tx, &encode_32(&wallet), &[allowed.as_str()]).unwrap_err().to_string();
+        assert!(err.contains("fee payer"), "{err}");
     }
 }

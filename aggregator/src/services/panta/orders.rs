@@ -161,6 +161,24 @@ async fn request_quote(
 }
 
 /// Builds a primary buy. Does not sign and does not broadcast.
+/// The cost of a Panta buy: what leaves the wallet, with the fee itemised.
+///
+/// Panta takes its fee in a separate transfer on top of the amount that buys shares. Seen on-chain: a
+/// $2.00 buy moved $2.00 to the market and $0.04 to Panta's fee account, $2.04 in all. So the total
+/// is the amount plus the fee; the app compares it with what a simulation says would leave.
+fn buy_cost(amount: Decimal, fee: Option<Decimal>) -> TransactionCost {
+    let fee = fee.filter(|f| *f > Decimal::ZERO);
+    let lines = fee
+        .map(|fee| CostLine {
+            label: "Panta fee".to_string(),
+            amount_usdc: fee,
+            note: Some("Reported by Panta with the quote and charged on top of the amount, as a separate transfer.".to_string()),
+        })
+        .into_iter()
+        .collect();
+    TransactionCost { total_usdc: amount + fee.unwrap_or(Decimal::ZERO), lines }
+}
+
 pub async fn build_buy(
     client: &reqwest::Client,
     base_url: &str,
@@ -216,14 +234,7 @@ pub async fn build_buy(
     let fee = built.fee_usdc.as_deref().or(Some(&quote.fee_usdc)).and_then(|f| f.trim().parse::<Decimal>().ok());
     let shares = built.expected_shares.as_deref().map(|s| parse_decimal("expectedShares", s)).transpose()?.unwrap_or(quoted_shares);
 
-    let mut lines = Vec::new();
-    if let Some(fee) = fee.filter(|f| *f > Decimal::ZERO) {
-        lines.push(CostLine {
-            label: "Panta fee".to_string(),
-            amount_usdc: fee,
-            note: Some("Reported by Panta with the quote. It is part of the amount you spend, not added on top.".to_string()),
-        });
-    }
+    let cost = buy_cost(amount, fee);
 
     Ok(UnsignedTransaction {
         venue_id: "panta".to_string(),
@@ -233,7 +244,7 @@ pub async fn build_buy(
         expires_at: expiry(now, built.blockhash_expiry_hint_sec, built.expires_at.as_deref()),
         required_signers: vec![intent.wallet.clone()],
         last_valid_block_height: built.last_valid_block_height,
-        cost: TransactionCost { total_usdc: amount, lines },
+        cost,
         preview: Some(OrderPreview {
             contracts: Some(shares.to_string()),
             avg_price_usdc: quote.avg_price.trim().parse().ok(),
@@ -680,5 +691,23 @@ mod tests {
         let p = to_position(row("YES", "5", "primary", false, false, None), "W");
         assert_eq!((p.cost_usdc, p.value_usdc, p.pnl_usdc, p.avg_price_usdc), (None, None, None, None));
         assert_eq!(p.side, "yes", "side is normalised");
+    }
+
+    #[test]
+    fn a_pantas_fee_is_on_top_of_the_amount_not_inside_it() {
+        // The $2.00 buy as it landed on-chain: $2.00 to the market, $0.04 to the fee account.
+        let cost = buy_cost(Decimal::from(2), Some("0.04".parse().unwrap()));
+        assert_eq!(cost.total_usdc, "2.04".parse::<Decimal>().unwrap());
+        assert_eq!(cost.lines.len(), 1);
+        assert_eq!(cost.lines[0].amount_usdc, "0.04".parse::<Decimal>().unwrap());
+    }
+
+    #[test]
+    fn no_fee_means_the_total_is_the_amount() {
+        for fee in [None, Some(Decimal::ZERO)] {
+            let cost = buy_cost(Decimal::from(5), fee);
+            assert_eq!(cost.total_usdc, Decimal::from(5));
+            assert!(cost.lines.is_empty());
+        }
     }
 }

@@ -57,6 +57,11 @@ pub const CREATE_REF_PREFIX: &str = "create:";
 fn validate(intent: &CreateMarketIntent, now: i64) -> Result<(), AdapterError> {
     let invalid = |msg: String| Err(AdapterError::InvalidRequest(msg));
 
+    // Checked here, not left to Panta: its 400 would come back as a retryable venue outage, and a
+    // wallet that isn't a Solana address can never succeed on retry.
+    if crate::utils::solana_tx::decode_32(&intent.wallet).is_err() {
+        return invalid("wallet must be a Solana address (32 bytes, base58)".into());
+    }
     if intent.question.trim().is_empty() {
         return invalid("question is required".into());
     }
@@ -150,6 +155,24 @@ fn cost_from(
 }
 
 /// Runs quote then build, returning a transaction ready for the caller's wallet.
+/// Passes a success through. A 400, 409 or 422 is Panta refusing what we sent, so its own message is
+/// returned as the caller's error (URLs stripped, length capped) - without it the caller sees only
+/// "400 Bad Request" and a retry that cannot work. Anything else keeps the plain venue error, so
+/// 401/403 still read as a rejected key and 429/5xx as backpressure or an outage.
+async fn checked(response: reqwest::Response, step: &str) -> Result<reqwest::Response, AdapterError> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    if matches!(status.as_u16(), 400 | 409 | 422) {
+        let body = response.text().await.unwrap_or_default();
+        let detail: String = crate::errors::adapter_error::redact_urls(body.trim()).chars().take(300).collect();
+        let detail = if detail.is_empty() { status.to_string() } else { detail };
+        return Err(AdapterError::InvalidRequest(format!("Panta rejected the {step}: {detail}")));
+    }
+    Err(AdapterError::Venue(response.error_for_status().expect_err("not a success").to_string()))
+}
+
 pub async fn build_create_market(
     client: &reqwest::Client,
     base_url: &str,
@@ -189,9 +212,8 @@ pub async fn build_create_market(
         .header("X-Api-Key", api_key)
         .json(&quote_body)
         .send()
-        .await?
-        .error_for_status()
-        .map_err(|e| AdapterError::Venue(e.to_string()))?;
+        .await?;
+    let response = checked(response, "quote").await?;
     let quote: PantaCreateQuoteResponse =
         parse_json_with_diagnostics(response, "panta create quote").await.map_err(AdapterError::Parse)?;
 
@@ -204,9 +226,8 @@ pub async fn build_create_market(
         .header("X-Api-Key", api_key)
         .json(&build_body)
         .send()
-        .await?
-        .error_for_status()
-        .map_err(|e| AdapterError::Venue(e.to_string()))?;
+        .await?;
+    let response = checked(response, "build").await?;
     let built: PantaCreateBuildResponse =
         parse_json_with_diagnostics(response, "panta create build").await.map_err(AdapterError::Parse)?;
 
@@ -315,7 +336,7 @@ mod tests {
             end_time: NOW + 20 * HOUR,
             resolution_time: NOW + 24 * HOUR,
             image_url: "https://example.com/img.png".to_string(),
-            wallet: "Wallet111".to_string(),
+            wallet: "11111111111111111111111111111111".to_string(),
             title: None,
             description: None,
             region: None,
@@ -325,6 +346,16 @@ mod tests {
     #[test]
     fn a_well_formed_intent_validates() {
         assert!(validate(&intent(), NOW).is_ok());
+    }
+
+    #[test]
+    fn a_wallet_that_is_not_a_solana_address_is_the_callers_error() {
+        for bad in ["nope", "", "0OIl", "1111"] {
+            let mut i = intent();
+            i.wallet = bad.to_string();
+            let err = validate(&i, NOW).unwrap_err();
+            assert!(matches!(err, AdapterError::InvalidRequest(_)), "'{bad}' should be a 400, not a venue failure: {err}");
+        }
     }
 
     #[test]
@@ -396,5 +427,28 @@ mod tests {
     fn a_reconciling_breakdown_is_reported_as_such() {
         let cost = cost_from("25000000", Some("20000000"), Some("5000000")).unwrap();
         assert!(cost.lines_reconcile());
+    }
+
+    fn reply(status: u16, body: &str) -> reqwest::Response {
+        reqwest::Response::from(axum::http::Response::builder().status(status).body(body.to_string()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn pantas_reason_for_refusing_a_creation_reaches_the_caller() {
+        let err = checked(reply(400, r#"{"error":"question already exists (see https://x.example/m/1)"}"#), "quote").await.unwrap_err();
+        let text = err.to_string();
+        assert!(matches!(err, AdapterError::InvalidRequest(_)), "a 400 is the caller's input: {text}");
+        assert!(text.contains("question already exists") && text.contains("quote"), "{text}");
+        assert!(!text.contains("x.example"), "urls are redacted: {text}");
+    }
+
+    #[tokio::test]
+    async fn auth_and_outage_statuses_keep_their_venue_error() {
+        for status in [401u16, 403, 429, 500, 503] {
+            let err = checked(reply(status, "nope"), "build").await.unwrap_err();
+            assert!(matches!(err, AdapterError::Venue(_)), "{status} stays a venue error: {err}");
+        }
+        assert!(checked(reply(401, ""), "build").await.unwrap_err().is_auth_failure());
+        assert!(checked(reply(200, "{}"), "build").await.is_ok());
     }
 }

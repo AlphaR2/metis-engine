@@ -7,10 +7,10 @@
 # nothing is broadcast, so no market is created and no fee is paid — this exercises every step
 # except the irreversible one.
 #
-# Needs a metis-api running with MARKET_CREATION_ENABLED=true and a working PANTA_API_KEY:
+# Needs a metis-api running with MODE=write (the default) and a working PANTA_API_KEY:
 #
 #     cd aggregator
-#     MARKET_CREATION_ENABLED=true cargo run -p metis-aggregator --bin metis-api
+#     MODE=write cargo run -p metis-aggregator --bin metis-api
 #
 # Reads nothing from your .env itself — it only talks to the local API.
 set -uo pipefail
@@ -37,7 +37,7 @@ print(f\"    market_creation_enabled : {d['market_creation_enabled']}\")
 for v in d['venues']:
     print(f\"    {v['venue_id']:<8} create={v['can_create_markets']} execute={v['can_execute']}\")
 if not d['market_creation_enabled']:
-    print('    → off. Restart with MARKET_CREATION_ENABLED=true to run the rest.')
+    print('    → off. Restart with MODE=write to run the rest.')
     raise SystemExit(1)
 " || exit 1
 

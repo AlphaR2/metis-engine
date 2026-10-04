@@ -2,14 +2,15 @@
 # Dry run of a Jupiter buy against the live API.
 #
 #     bash scripts/dry-run-order.sh
+#     WALLET=<your public address> bash scripts/dry-run-order.sh   # a funded wallet builds a real tx
 #
 # Builds a REAL order and a REAL unsigned transaction, then STOPS. Nothing is signed, nothing is
 # broadcast, no USDC moves. This exercises every step except the irreversible one.
 #
-# Needs a metis-api running with EXECUTION_ENABLED=true and a working JUPITER_API_KEY:
+# Needs a metis-api running with MODE=write (the default) and a working JUPITER_API_KEY:
 #
 #     cd aggregator
-#     EXECUTION_ENABLED=true cargo run -p metis-aggregator --bin metis-api
+#     MODE=write cargo run -p metis-aggregator --bin metis-api
 #
 # Reads nothing from your .env — it only talks to the local API.
 set -uo pipefail
@@ -17,6 +18,7 @@ set -uo pipefail
 API="${METIS_API:-http://localhost:8080}"
 SIZE="${SIZE:-5}"          # Jupiter's documented minimum is $5
 CATEGORY="${CATEGORY:-sports}"
+WALLET="${WALLET:-11111111111111111111111111111111}"
 
 command -v python3 >/dev/null || { echo "python3 required"; exit 1; }
 curl -s -m 5 "$API/health" >/dev/null 2>&1 || { echo "metis-api not answering at $API"; exit 1; }
@@ -32,13 +34,13 @@ import json,sys
 d=json.load(sys.stdin)
 print(f\"    execution_enabled : {d['execution_enabled']}\")
 if not d['execution_enabled']:
-    print('    → off. Restart with EXECUTION_ENABLED=true to run the rest.')
+    print('    → off. Restart with MODE=write to run the rest.')
     raise SystemExit(1)
 " || exit 1
 
 echo
 echo "[2] Pick a real, liquid market from the catalogue"
-MARKET=$(curl -s -m 30 "$API/markets?category=$CATEGORY&venue=jupiter&sort=best_liquidity&limit=1" \
+MARKET=$(curl -s -m 30 "$API/v1/markets?category=$CATEGORY&venue=jupiter&sort=volume&limit=1" \
   | python3 -c "
 import json,sys
 m=(json.load(sys.stdin).get('markets') or [None])[0]
@@ -54,16 +56,20 @@ echo "    title  : ${MARKET_TITLE:0:70}"
 
 echo
 echo "[3] Build a real unsigned buy for \$$SIZE"
-curl -s -m 60 -X POST "$API/execution/orders" -H 'content-type: application/json' -d "$(python3 -c "
+BODY=$(python3 -c "
 import json
 print(json.dumps({
   'venue_id':'jupiter',
   'venue_market_id':'$MARKET_ID',
   'side':'yes',
   'amount_usdc':'$SIZE',
-  # Never signed, so this wallet is never charged.
-  'wallet':'11111111111111111111111111111111',
-}))")" | python3 -c "
+  # Never signed, so nothing is charged. The placeholder owns no USDC, so Jupiter prices the order
+  # but builds no transaction; pass WALLET=<your public address> to see a real one.
+  'wallet':'$WALLET',
+}))")
+
+curl -s -m 60 -X POST "$API/execution/orders" -H 'content-type: application/json' -d "$BODY" \
+| python3 -c "
 import base64, json, sys
 d = json.load(sys.stdin)
 if 'error' in d:

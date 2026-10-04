@@ -61,9 +61,10 @@ impl PantaAdapter {
         self.chain.as_ref().map_or(chain::PROGRAM_ID, |c| c.program_id.as_str())
     }
 
-    /// The single-market record, cached (see `reconcile_with_details`). `None` when the call
-    /// fails - the caller keeps what it has.
-    async fn detail(&self, market_id: &str, now: i64) -> Option<PantaMarketRow> {
+    /// The single-market record, cached (see `reconcile_with_details`). On failure the caller keeps
+    /// what it has; the error is returned so `settle_details` can tell a rejected key from a
+    /// market Panta simply has no record of.
+    async fn detail(&self, market_id: &str, now: i64) -> Result<PantaMarketRow, AdapterError> {
         const DETAIL_TTL_SECS: i64 = 120;
         let cached = self
             .details
@@ -72,19 +73,59 @@ impl PantaAdapter {
             .get(market_id)
             .filter(|(at, detail)| detail.is_terminal() || now - at < DETAIL_TTL_SECS)
             .map(|(_, detail)| detail.clone());
-        if cached.is_some() {
-            return cached;
+        if let Some(cached) = cached {
+            return Ok(cached);
         }
-        match client::get_market_row(&self.client, &self.base_url, &self.api_key, market_id).await {
-            Ok(detail) => {
-                self.details.lock().expect("detail cache lock poisoned").insert(market_id.to_string(), (now, detail.clone()));
-                Some(detail)
-            }
-            Err(err) => {
-                tracing::warn!("panta: could not fetch details for {market_id}: {err}");
-                None
+        let detail = client::get_market_row(&self.client, &self.base_url, &self.api_key, market_id).await?;
+        self.details.lock().expect("detail cache lock poisoned").insert(market_id.to_string(), (now, detail.clone()));
+        Ok(detail)
+    }
+
+    /// Fetches the detail record for each market id, in order, and summarises the failures once
+    /// instead of one warning per market.
+    ///
+    /// A market Panta has no record of (or a one-off error) just keeps its listed row. But if every
+    /// call was rejected as unauthorized and none succeeded, the key is the problem - the whole
+    /// pass is failed so the refresh keeps the previous catalog, marks it stale and records the
+    /// venue as unhealthy, rather than publishing a catalog with no categories or text.
+    async fn settle_details(&self, ids: &[String], now: i64) -> Result<Vec<Option<PantaMarketRow>>, AdapterError> {
+        // In small batches, so a page of open markets doesn't burst into Panta's rate limit.
+        const DETAIL_CONCURRENCY: usize = 8;
+        let mut results = Vec::with_capacity(ids.len());
+        for batch in ids.chunks(DETAIL_CONCURRENCY) {
+            results.extend(futures::future::join_all(batch.iter().map(|id| self.detail(id, now))).await);
+        }
+        let (mut ok, mut auth, mut other) = (0usize, 0usize, 0usize);
+        let mut first_auth: Option<AdapterError> = None;
+        let mut details = Vec::with_capacity(results.len());
+        for (id, result) in ids.iter().zip(results) {
+            match result {
+                Ok(detail) => {
+                    ok += 1;
+                    details.push(Some(detail));
+                }
+                Err(err) => {
+                    tracing::debug!("panta: no detail for {id}: {err}");
+                    if err.is_auth_failure() {
+                        auth += 1;
+                        first_auth.get_or_insert(err);
+                    } else {
+                        other += 1;
+                    }
+                    details.push(None);
+                }
             }
         }
+        if let Some(err) = first_auth {
+            if ok == 0 {
+                tracing::error!("panta: every detail call was rejected as unauthorized ({auth}) - check PANTA_API_KEY");
+                return Err(err);
+            }
+            tracing::warn!("panta: {auth} of {} detail calls were unauthorized and {other} failed otherwise; those markets keep their listed data", ids.len());
+        } else if other > 0 {
+            tracing::warn!("panta: {other} of {} detail calls failed; those markets keep their listed data", ids.len());
+        }
+        Ok(details)
     }
 
     /// Every open market, found on-chain and described by the API.
@@ -98,7 +139,8 @@ impl PantaAdapter {
         let now = crate::utils::time::now_unix();
         let events = chain::list_events(&self.client, &source.rpc_url, &source.program_id).await?;
         let open: Vec<chain::ChainEvent> = events.into_iter().filter(|e| e.is_open(now)).collect();
-        let details = futures::future::join_all(open.iter().map(|e| self.detail(&e.market_id, now))).await;
+        let ids: Vec<String> = open.iter().map(|e| e.market_id.clone()).collect();
+        let details = self.settle_details(&ids, now).await?;
         Ok(open.iter().zip(details).map(|(event, detail)| merge_chain(event, detail, now)).collect())
     }
 
@@ -111,16 +153,18 @@ impl PantaAdapter {
     /// is reused for `DETAIL_TTL_SECS`, which dedupes the same market seen by several chains in
     /// one refresh without letting its state go stale across refreshes. A failed detail call
     /// leaves the row as listed rather than failing the page.
-    async fn reconcile_with_details(&self, rows: &mut [PantaMarketRow]) {
+    async fn reconcile_with_details(&self, rows: &mut [PantaMarketRow]) -> Result<(), AdapterError> {
         let now = crate::utils::time::now_unix();
-        for row in rows.iter_mut() {
-            if !VenueMarket::from(row.clone()).is_open(now) {
-                continue;
-            }
-            if let Some(detail) = self.detail(&row.market_id, now).await {
-                row.reconcile_with(&detail);
+        let open: Vec<usize> =
+            (0..rows.len()).filter(|&i| VenueMarket::from(rows[i].clone()).is_open(now)).collect();
+        let ids: Vec<String> = open.iter().map(|&i| rows[i].market_id.clone()).collect();
+        let details = self.settle_details(&ids, now).await?;
+        for (i, detail) in open.into_iter().zip(details) {
+            if let Some(detail) = detail {
+                rows[i].reconcile_with(&detail);
             }
         }
+        Ok(())
     }
 }
 
@@ -260,7 +304,7 @@ impl VenueAdapter for PantaAdapter {
             return Ok(MarketPage { items: rows.into_iter().map(Into::into).collect(), next_cursor: None });
         }
         let (mut rows, next_cursor) = client::list_markets(&self.client, &self.base_url, &self.api_key, params).await?;
-        self.reconcile_with_details(&mut rows).await;
+        self.reconcile_with_details(&mut rows).await?;
         Ok(MarketPage { items: rows.into_iter().map(Into::into).collect(), next_cursor })
     }
 

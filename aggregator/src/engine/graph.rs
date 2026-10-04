@@ -48,6 +48,11 @@ pub struct MarketNode {
 }
 
 impl MarketNode {
+    /// Whether another venue lists this same question - the match an aggregator exists to find.
+    pub fn is_matched(&self) -> bool {
+        !self.same_question_as.is_empty()
+    }
+
     pub fn volume(&self) -> Decimal {
         self.market.liquidity.unwrap_or(Decimal::ZERO)
     }
@@ -120,6 +125,13 @@ pub struct EventNode {
 }
 
 /// The whole graph, with lookups.
+impl EventNode {
+    /// How many of its markets are listed, as the same question, on another venue.
+    pub fn matched_markets(&self) -> usize {
+        self.markets.iter().filter(|m| m.is_matched()).count()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct EventGraph {
     pub events: Vec<EventNode>,

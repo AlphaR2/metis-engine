@@ -61,6 +61,8 @@ const TERM_ALIASES: &[(&str, &[&str])] = &[
     ("man", &["manchester"]),
     ("utd", &["united"]),
     ("spurs", &["tottenham"]),
+    // Panta writes "the Republican nomination", Jupiter "Republican nominee": one bet.
+    ("nomination", &["nominee"]),
 ];
 
 /// Words that open or pad a prediction title without saying what it is about.

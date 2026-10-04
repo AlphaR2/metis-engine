@@ -57,13 +57,13 @@ fn adapter(
         })
 }
 
-/// The refusal a disabled flag produces. Says which switch, so an operator isn't left guessing.
-fn disabled(what: &str, flag: &str, code: ErrorCode) -> ApiError {
+/// The refusal in read-only mode. Names the switch, so an operator isn't left guessing.
+fn disabled(what: &str, code: ErrorCode) -> ApiError {
     ApiError::bad_request(
         code,
         format!(
-            "{what} is disabled on this deployment. Set {flag}=true to enable it. \
-             It is off by default because it moves real funds and cannot be undone."
+            "{what} is disabled: this deployment runs read-only. Set MODE=write to enable it. \
+             Write mode only builds unsigned transactions; the caller's wallet signs them."
         ),
     )
 }
@@ -118,7 +118,7 @@ pub async fn build_order(
     Json(intent): Json<BuyIntent>,
 ) -> Result<Json<BuildResponse>, ApiError> {
     if !state.execution_enabled {
-        return Err(disabled("Trading", "EXECUTION_ENABLED", ErrorCode::ExecutionDisabled));
+        return Err(disabled("Trading", ErrorCode::ExecutionDisabled));
     }
     let venue = adapter(&state, &intent.venue_id)?;
     let transaction = venue.build_buy(&intent).await?;
@@ -142,7 +142,7 @@ pub async fn build_market(
     Json(intent): Json<CreateMarketIntent>,
 ) -> Result<Json<BuildResponse>, ApiError> {
     if !state.market_creation_enabled {
-        return Err(disabled("Market creation", "MARKET_CREATION_ENABLED", ErrorCode::MarketCreationDisabled));
+        return Err(disabled("Market creation", ErrorCode::MarketCreationDisabled));
     }
     let venue = adapter(&state, &intent.venue_id)?;
     let transaction = venue.build_create_market(&intent).await?;
@@ -167,7 +167,7 @@ pub async fn build_claim(
     // A claim only ever pays in, but it rides the same venue plumbing as everything else here, so
     // it stays behind the same switch rather than being quietly always-on.
     if !state.execution_enabled {
-        return Err(disabled("Claiming", "EXECUTION_ENABLED", ErrorCode::ExecutionDisabled));
+        return Err(disabled("Claiming", ErrorCode::ExecutionDisabled));
     }
     let venue = adapter(&state, &intent.venue_id)?;
     let transaction = venue.build_claim(&intent).await?;
@@ -195,7 +195,7 @@ pub async fn build_sell(
     Json(intent): Json<SellIntent>,
 ) -> Result<Json<BuildResponse>, ApiError> {
     if !state.execution_enabled {
-        return Err(disabled("Selling", "EXECUTION_ENABLED", ErrorCode::ExecutionDisabled));
+        return Err(disabled("Selling", ErrorCode::ExecutionDisabled));
     }
     let venue = adapter(&state, &intent.venue_id)?;
     let transaction = venue.build_sell(&intent).await?;
@@ -244,9 +244,9 @@ pub struct VenueAbilities {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AbilitiesResponse {
-    /// False when `EXECUTION_ENABLED` is off, whatever the venues support.
+    /// False in read-only mode (`MODE=read`), whatever the venues support.
     pub execution_enabled: bool,
-    /// False when `MARKET_CREATION_ENABLED` is off.
+    /// False in read-only mode (`MODE=read`).
     pub market_creation_enabled: bool,
     pub venues: Vec<VenueAbilities>,
 }

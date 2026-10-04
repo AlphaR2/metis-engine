@@ -135,8 +135,12 @@ impl Prepared<'_> {
             })
             .collect();
         link_identical_questions(&mut nodes);
+        // Markets another venue also lists lead: seeing the same question priced on two venues is
+        // what the aggregator is for, so they come before anything merely well-rated.
         nodes.sort_by(|a, b| {
-            b.rating.score.cmp(&a.rating.score).then(b.volume().cmp(&a.volume())).then(a.market.venue_market_id.cmp(&b.market.venue_market_id))
+            b.is_matched()
+                .cmp(&a.is_matched())
+                .then(b.rating.score.cmp(&a.rating.score)).then(b.volume().cmp(&a.volume())).then(a.market.venue_market_id.cmp(&b.market.venue_market_id))
         });
 
         let venues: Vec<String> = members.iter().map(|m| m.venue_id.clone()).collect::<BTreeSet<_>>().into_iter().collect();
@@ -312,31 +316,84 @@ fn shared_title(source: &str, shared: &BTreeSet<String>) -> Option<String> {
 /// Tags markets that ask the same question on different venues, so they can sit side by side. Two
 /// markets are the same question when their distinctive words and their numbers agree.
 fn link_identical_questions(nodes: &mut [MarketNode]) {
-    let signatures: Vec<(BTreeSet<String>, Vec<Decimal>)> = nodes
-        .iter()
-        .map(|n| {
-            let mut numbers = text::numbers(&n.market.title);
-            numbers.sort();
-            (subject_terms(&n.market.title), numbers)
-        })
-        .collect();
+    let signatures: Vec<QuestionSignature> = nodes.iter().map(|n| QuestionSignature::of(&n.market)).collect();
     for i in 0..nodes.len() {
         for j in (i + 1)..nodes.len() {
             if nodes[i].market.venue_id == nodes[j].market.venue_id {
                 continue;
             }
-            let (a, b) = (&signatures[i], &signatures[j]);
-            if a.1 != b.1 || a.0.is_empty() || b.0.is_empty() {
-                continue;
-            }
-            let shared = a.0.intersection(&b.0).count() as f64;
-            let union = a.0.union(&b.0).count() as f64;
-            if shared / union >= 0.8 {
+            if signatures[i].same_question(&signatures[j]) {
                 let (ri, rj) = (ref_of(&nodes[i].market), ref_of(&nodes[j].market));
                 nodes[i].same_question_as.push(rj);
                 nodes[j].same_question_as.push(ri);
             }
         }
+    }
+}
+
+/// Which way a market bets on a threshold: "hit $100,000", "↑ 100,000" and "above 100k" all bet
+/// up; "↓ 45,000", "dip to" and "below" bet down. Two markets on the same number that bet opposite
+/// ways are different questions, so the direction has to agree whenever both state one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Up,
+    Down,
+}
+
+impl Direction {
+    fn of(text: &str) -> Option<Self> {
+        let words: Vec<String> = text.split(|c: char| !c.is_alphanumeric()).map(str::to_lowercase).collect();
+        let has = |set: &[&str]| words.iter().any(|w| set.contains(&w.as_str()));
+        let up = text.contains('↑') || has(&["hit", "hits", "reach", "reaches", "above", "over", "exceed", "exceeds", "surpass", "higher", "rise"]);
+        let down = text.contains('↓') || has(&["dip", "dips", "below", "under", "fall", "falls", "drop", "drops", "lower"]);
+        match (up, down) {
+            (true, false) => Some(Self::Up),
+            (false, true) => Some(Self::Down),
+            _ => None,
+        }
+    }
+}
+
+/// What a market asks, read from its whole question - the event's title plus its own - not just its
+/// own title. Jupiter lists a threshold market as the bare "↑ 100,000" under an event called
+/// "Bitcoin · Dec 31, 2026", so its own title alone says nothing of what it is about.
+struct QuestionSignature {
+    terms: BTreeSet<String>,
+    numbers: Vec<Decimal>,
+    direction: Option<Direction>,
+}
+
+/// Words that say when or which way, not what: the date and direction are compared as numbers and
+/// `Direction`, so leaving them out of the words stops "31 Dec" vs "December 31" from counting as a
+/// difference.
+const WHEN_WORDS: &[&str] = &[
+    "jan", "january", "feb", "february", "mar", "march", "apr", "april", "may", "jun", "june", "jul", "july", "aug", "august", "sep", "sept",
+    "september", "oct", "october", "nov", "november", "dec", "december", "by", "on", "in", "the",
+];
+
+impl QuestionSignature {
+    fn of(market: &VenueMarket) -> Self {
+        let full = market.compose_display_title();
+        let mut numbers = text::numbers(&full);
+        numbers.sort();
+        numbers.dedup();
+        let terms = subject_terms(&full).into_iter().filter(|t| !WHEN_WORDS.contains(&t.as_str())).collect();
+        Self { terms, numbers, direction: Direction::of(&full) }
+    }
+
+    /// Same distinctive words (80% overlap), the same numbers, and no opposite directions.
+    fn same_question(&self, other: &Self) -> bool {
+        if self.numbers != other.numbers || self.terms.is_empty() || other.terms.is_empty() {
+            return false;
+        }
+        if let (Some(a), Some(b)) = (self.direction, other.direction)
+            && a != b
+        {
+            return false;
+        }
+        let shared = self.terms.intersection(&other.terms).count() as f64;
+        let union = self.terms.union(&other.terms).count() as f64;
+        shared / union >= 0.8
     }
 }
 
@@ -488,5 +545,91 @@ mod tests {
         let (event, node) = graph.find_market("panta", "female").unwrap();
         assert_eq!(node.market.venue_market_id, "female");
         assert!(graph.event(&event.id).is_some());
+    }
+
+    #[test]
+    fn a_threshold_market_matches_across_venues_through_its_event_title() {
+        let jup = |id: &str, title: &str| {
+            let mut m = market("jupiter", id, title, None, 5);
+            m.event = Some(VenueEvent { event_id: "e".into(), title: "Bitcoin · Dec 31, 2026".into(), ..Default::default() });
+            m
+        };
+        let panta = market("panta", "p", "Will bitcoin hit $100,000 by 31 Dec 2026", None, 1);
+        let up = jup("up", "↑ 100,000");
+        let down = jup("down", "↓ 100,000");
+        let other = jup("other", "↑ 250,000");
+        let sig = QuestionSignature::of;
+        assert!(sig(&panta).same_question(&sig(&up)), "hit $100,000 is the same bet as ↑ 100,000");
+        assert!(!sig(&panta).same_question(&sig(&down)), "the opposite direction is a different question");
+        assert!(!sig(&panta).same_question(&sig(&other)), "a different threshold is a different question");
+    }
+
+    #[test]
+    fn a_question_listed_on_two_venues_leads_its_event_however_quiet_it_is() {
+        let mut markets = vec![
+            market("jupiter", "loud", "Will Quincy Orbit exceed 500 launches before December 2026?", None, 9_000),
+            market("panta", "p", "Will Quincy Orbit launch before December 2026?", None, 1),
+            market("jupiter", "j", "Will Quincy Orbit launch before December 2026?", None, 2),
+        ];
+        markets.extend(filler(20));
+        let graph = build(&markets);
+        let event = graph.events.iter().find(|e| e.market_count == 3).expect("one event, three markets");
+        assert_eq!(event.matched_markets(), 2);
+        assert!(event.markets[0].is_matched() && event.markets[1].is_matched(), "the matched pair leads, ahead of the 9000-volume market");
+        assert_eq!(event.markets[2].market.venue_market_id, "loud");
+    }
+
+    /// Runs the matcher over the saved venue captures in `fixtures/` and prints what pairs across
+    /// venues. A look at real data, not an assertion: the captures are a snapshot, so what matches
+    /// changes with them. Run with `cargo test -p metis-aggregator --bin metis-api fixture_pairs -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "reads the saved captures and prints; run on demand"]
+    fn fixture_pairs_across_venues() {
+        use crate::models::venue::jupiter::JupEventsResponse;
+        use crate::models::venue::panta::PantaMarketRow;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        let mut markets: Vec<VenueMarket> = Vec::new();
+        for entry in std::fs::read_dir(dir.join("jupiter")).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("events-") || name == "events-all.json" {
+                continue;
+            }
+            let Ok(parsed) = serde_json::from_slice::<JupEventsResponse>(&std::fs::read(entry.path()).unwrap()) else { continue };
+            for event in &parsed.data {
+                for m in &event.markets {
+                    let mut vm = crate::services::jupiter::client::market_to_venue_market(Some(event), m);
+                    vm.venue_id = "jupiter".into();
+                    markets.push(vm);
+                }
+            }
+        }
+        let jupiter = markets.len();
+        for entry in std::fs::read_dir(dir.join("panta")).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("market-") {
+                continue;
+            }
+            if let Ok(row) = serde_json::from_slice::<PantaMarketRow>(&std::fs::read(entry.path()).unwrap()) {
+                let mut vm = VenueMarket::from(row);
+                vm.venue_id = "panta".into();
+                // The captured rows are all resolved or cancelled, so none would be built. One
+                // still closes in the future; treat it as live so the matcher sees a real pair.
+                if vm.close_time > 1_790_248_525 {
+                    vm.dead = false;
+                }
+                markets.push(vm);
+            }
+        }
+        println!("loaded {jupiter} jupiter + {} panta markets", markets.len() - jupiter);
+        let refs: Vec<&VenueMarket> = markets.iter().collect();
+        let graph = build_events(&refs, |_| true, 1_790_248_525);
+        let multi: Vec<_> = graph.events.iter().filter(|e| e.venue_count > 1).collect();
+        println!("{} events, {} on several venues", graph.events.len(), multi.len());
+        for e in multi {
+            println!("\n[{}] {} ({} markets, {} matched)", e.grouping.reason, e.title, e.market_count, e.matched_markets());
+            for n in e.markets.iter().filter(|n| n.is_matched() || n.market.venue_id == "panta").take(6) {
+                println!("   {:>7} {} | {}", n.market.venue_id, n.market.display_title.chars().take(70).collect::<String>(), if n.is_matched() { "MATCHED" } else { "" });
+            }
+        }
     }
 }
