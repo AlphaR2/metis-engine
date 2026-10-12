@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The Meteora (DBC) keeper for crowd-seeded markets. Wraps keepers/meteora with the keys and addresses
+# The Meteora (DBC) keeper for crowd-seeded markets. Wraps dbc/keeper with the keys and addresses
 # 01-setup.sh saved. Nothing secret is passed on a command line: only key FILE paths.
 #
 #   dbc.sh install                     npm install the keeper once
@@ -17,7 +17,7 @@
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
 [ -f "$STATE" ] || { echo "run devnet/01-setup.sh first"; exit 1; }
-cd "$ENGINE/keepers/meteora"
+cd "$ENGINE/dbc/keeper"
 export RPC_URL KEEPER_KEYPAIR=$D/dbc-keeper.json OPERATOR_KEYPAIR=$D/operator.json QUOTE_MINT=$MINT \
   TREASURY=$(P treasury) CORE_PROGRAM=$CORE OPS_BIN=$OPS STATE_FILE=$D/dbc-state.json \
   CLIFF_SECS=${CLIFF_SECS:-172800} VEST_PERIOD_SECS=${VEST_PERIOD_SECS:-86400} \

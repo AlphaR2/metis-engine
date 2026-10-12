@@ -1,6 +1,6 @@
 # Docs
 
-Start with [architecture](architecture.md). Then:
+Start with [architecture](architecture.md). The Open Pool (Meteora DBC) has its own entry point at [`../dbc/README.md`](../dbc/README.md). Then:
 
 | Doc | About |
 |---|---|
@@ -9,6 +9,7 @@ Start with [architecture](architecture.md). Then:
 | [formulas.md](formulas.md) | The curve, fees and payout maths |
 | [devnet-setup.md](devnet-setup.md) | Deploying and initialising the programs on devnet |
 | [deployment.md](deployment.md) | Hosting the services (GitHub, Railway, Vercel) |
+| [upgrade-programs.md](upgrade-programs.md) | Upgrading a deployed program in place |
 | [disclosure.md](disclosure.md) | Prior work and what was built in the judged period |
 | [adding-a-venue.md](adding-a-venue.md), [venue-fields.md](venue-fields.md) | How a new venue plugs into the aggregator |
 | [runbook.md](runbook.md) | Operating the services |

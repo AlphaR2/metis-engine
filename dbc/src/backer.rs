@@ -1,9 +1,6 @@
-//! Shared by the DBC-backed paths (activate_market, claim_backer): where the seed shares of a
-//! backed market live, and how a backer's slice of anything is computed.
+//! A backer's share arithmetic, and where a backed market's escrowed seed shares live.
 
 use pinocchio::{Address, error::ProgramError};
-
-use crate::constants::OUTCOME_MINT_SEED;
 
 /// The associated token account of `owner` for `mint`: where a backed market's seed shares are
 /// escrowed (owner = the market PDA). Derived rather than passed in, so activation and every later
@@ -15,14 +12,6 @@ pub fn ata_address(owner: &Address, mint: &Address) -> Result<Address, ProgramEr
     )
     .ok_or(ProgramError::InvalidSeeds)?;
     Ok(ata)
-}
-
-/// The market's outcome mint for `index`, as initialize_market derived it.
-pub fn outcome_mint_address(market: &Address, index: u8) -> Result<Address, ProgramError> {
-    let index_byte = [index];
-    let (mint, _) = Address::derive_program_address(&[OUTCOME_MINT_SEED, market.as_ref(), &index_byte], &crate::ID)
-        .ok_or(ProgramError::InvalidSeeds)?;
-    Ok(mint)
 }
 
 /// `amount * tokens / supply`, rounded down: a backer's slice of `amount` when they redeem

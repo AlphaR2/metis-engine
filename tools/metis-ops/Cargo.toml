@@ -20,6 +20,7 @@ localnet = ["metis-core/localnet", "metis-oracle/localnet"]
 short-timers = ["metis-core/short-timers", "metis-oracle/short-timers"]
 
 [dependencies]
+metis-dbc = { path = "../../dbc" }
 metis-core = { path = "../../programs/core", features = ["no-entrypoint"] }
 metis-oracle = { path = "../../programs/oracle", features = ["no-entrypoint"] }
 bytemuck = { workspace = true }

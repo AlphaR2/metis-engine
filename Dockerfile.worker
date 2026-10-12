@@ -23,8 +23,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY devnet ./devnet
-COPY keepers/meteora ./keepers/meteora
-RUN cd keepers/meteora && npm ci --no-audit --no-fund
+COPY dbc/keeper ./dbc/keeper
+RUN cd dbc/keeper && npm ci --no-audit --no-fund
 # where devnet/common.sh looks for the tools of the devnet build
 COPY --from=build /out/metis-ops /out/oracle-keeper ./target/bin-devnet/debug/
 ENV NET=devnet DEMO_KEYS=/data/keys

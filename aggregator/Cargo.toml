@@ -8,6 +8,7 @@ name = "metis-api"
 path = "src/main.rs"
 
 [dependencies]
+metis-dbc = { path = "../dbc" }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

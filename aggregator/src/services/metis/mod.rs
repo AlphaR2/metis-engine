@@ -13,6 +13,7 @@
 
 mod chain;
 mod create;
+mod dbc;
 mod orders;
 mod secondary;
 mod service;

@@ -66,7 +66,7 @@ In GitHub Desktop (or `git status`), look at the list of changed files. You must
 `devnet/keys-devnet/…`, `target/…`, `aggregator/.env`, `localnet/keys/…`, anything ending in `-keypair.json`, or
 `.env.local` in the website. They are all already ignored, so they should not appear; this check is your safety net.
 
-You **do** need these in `metis-engine`: `Dockerfile`, `Dockerfile.worker`, the whole `devnet/` folder, `keepers/`,
+You **do** need these in `metis-engine`: `Dockerfile`, `Dockerfile.worker`, the whole `devnet/` folder, `dbc/`,
 `authority/src/network.rs` (it holds your four **public** root/guardian addresses, and the build compiles them in),
 `Cargo.lock`, and the `programs`, `tools`, `aggregator` folders. 
 

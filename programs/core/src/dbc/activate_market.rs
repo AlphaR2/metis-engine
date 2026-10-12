@@ -18,7 +18,7 @@ use crate::{
     },
     constants::{MARKET_SEED, MAX_OUTCOMES},
     error::MetisError,
-    settlement::backer::{ata_address, outcome_mint_address},
+    dbc::backer::{ata_address, outcome_mint_address},
     validation,
 };
 

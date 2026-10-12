@@ -13,10 +13,8 @@ use crate::{
     amm::state::{MARKET_DISCRIMINATOR, Market, MarketStatus, SeedSource},
     constants::{MARKET_SEED, MAX_OUTCOMES, QUOTE_DECIMALS},
     error::MetisError,
-    settlement::{
-        backer::{ata_address, outcome_mint_address, pro_rata},
-        payout::compute_payout,
-    },
+    dbc::backer::{ata_address, outcome_mint_address, pro_rata},
+    settlement::payout::compute_payout,
     validation,
 };
 

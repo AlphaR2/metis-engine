@@ -3,7 +3,6 @@
 //! handlers (each one holding its own full logic, no separate controller
 //! layer).
 
-pub mod backer;
 pub mod instructions;
 pub mod payout;
 pub mod state;

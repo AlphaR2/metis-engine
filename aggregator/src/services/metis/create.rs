@@ -16,14 +16,11 @@ use bytemuck::bytes_of;
 use metis_core::{
     amm::{
         condition,
-        instructions::{
-            initialize_market::{InitializeBackedMarketArgs, InitializeMarketArgs},
-            set_metadata::SetMetadataArgs,
-        },
+        instructions::{initialize_market::InitializeMarketArgs, set_metadata::SetMetadataArgs},
         metadata::{CATEGORY_MAX, LABEL_MAX, LEAGUE_MAX, QUESTION_MAX, RUBRIC_MAX},
-        state::{INITIALIZE_BACKED_MARKET, INITIALIZE_MARKET, SET_METADATA},
+        state::{INITIALIZE_MARKET, SET_METADATA},
     },
-    constants::{MARKET_SEED, MAX_BACKED_SEED, METADATA_SEED, VAULT_SEED},
+    constants::{MARKET_SEED, METADATA_SEED, VAULT_SEED},
 };
 use serde_json::Value;
 use solana_pubkey::Pubkey;
@@ -41,36 +38,24 @@ use crate::{
     },
 };
 
-const ASSUMED_BLOCKHASH_SECS: i64 = 60;
+pub(super) const ASSUMED_BLOCKHASH_SECS: i64 = 60;
 
 /// The oracle program's football account discriminator (its last 8 bytes).
 const FOOTBALL_SETTLED_DISCRIMINATOR: [u8; 8] = [130, 33, 121, 117, 222, 174, 224, 194];
 
-/// What `create_step` has already worked out and `backed_create` needs.
-struct BackedCreate {
-    market: Pubkey,
-    vault: Pubkey,
-    nonce: u64,
-    oracle: Pubkey,
-    quote_mint: Pubkey,
-    kind: u8,
-    line: u8,
-    min_seed: u64,
-}
-
-fn bad(message: impl Into<String>) -> AdapterError {
+pub(super) fn bad(message: impl Into<String>) -> AdapterError {
     AdapterError::InvalidRequest(message.into())
 }
 
-fn key(pubkey: &Pubkey) -> [u8; 32] {
+pub(super) fn key(pubkey: &Pubkey) -> [u8; 32] {
     pubkey.to_bytes()
 }
 
-fn meta(pubkey: &Pubkey, signer: bool, writable: bool) -> crate::utils::solana_tx::AccountMeta {
+pub(super) fn meta(pubkey: &Pubkey, signer: bool, writable: bool) -> crate::utils::solana_tx::AccountMeta {
     crate::utils::solana_tx::AccountMeta { pubkey: key(pubkey), is_signer: signer, is_writable: writable }
 }
 
-fn param<'a>(params: &'a Value, name: &str) -> Option<&'a str> {
+pub(super) fn param<'a>(params: &'a Value, name: &str) -> Option<&'a str> {
     params.get(name).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
 }
 
@@ -179,7 +164,7 @@ impl MetisAdapter {
         };
         let creator_usdc = associated_token_account(wallet, &quote_mint);
         if param(params, "seed") == Some("dbc") {
-            return self.backed_create(intent, params, wallet, BackedCreate { market, vault, nonce, oracle, quote_mint, kind, line, min_seed: dials.market_init_fee }).await;
+            return self.backed_create(intent, params, wallet, super::dbc::BackedCreate { market, vault, nonce, oracle, quote_mint, kind, line, min_seed: dials.market_init_fee }).await;
         }
         let balance = self.rpc.account(&creator_usdc).await?.map(|d| super::chain::token_amount(&d)).unwrap_or(0);
         if balance < dials.market_init_fee {
@@ -233,77 +218,6 @@ impl MetisAdapter {
                     label: "Market seed".to_string(),
                     amount_usdc: usdc(dials.market_init_fee),
                     note: Some("becomes the market's opening pot; you hold the shares it buys and earn the creator share of fees".to_string()),
-                }],
-            },
-            preview: None,
-        })
-    }
-
-    /// `initialize_backed_market`: the creator signs, pays rent only, and a Meteora raise seeds the pot.
-    async fn backed_create(&self, intent: &CreateMarketIntent, params: &Value, wallet: &Pubkey, b: BackedCreate) -> Result<UnsignedTransaction, AdapterError> {
-        let backer_mint: Pubkey = param(params, "backer_mint")
-            .ok_or_else(|| bad("a crowd-seeded market needs venue_params.backer_mint (reserve it with the Meteora keeper first)"))?
-            .parse()
-            .map_err(|_| bad("venue_params.backer_mint is not a valid address"))?;
-        let seed_usdc = params.get("seed_usdc").and_then(Value::as_f64).ok_or_else(|| bad("venue_params.seed_usdc (the opening pot the raise must deliver) is required"))?;
-        let seed_target = (seed_usdc * 1_000_000.0).round() as u64;
-        if seed_target < b.min_seed || seed_target > MAX_BACKED_SEED {
-            return Err(bad(format!("seed_usdc must be between {} and {} USDC", usdc(b.min_seed), usdc(MAX_BACKED_SEED))));
-        }
-        let raise_secs = params.get("raise_secs").and_then(Value::as_i64).unwrap_or(1200);
-        let raise_deadline = now_unix() + raise_secs;
-        let platform = platform_param(params)?;
-        let program = self.settings.program_id;
-        let args = InitializeBackedMarketArgs {
-            nonce: b.nonce,
-            num_outcomes: 2,
-            condition_kind: b.kind,
-            condition_param: b.line,
-            _padding: [0; 5],
-            platform,
-            backer_mint: backer_mint.to_bytes(),
-            seed_target,
-            raise_deadline,
-        };
-        let mut data = INITIALIZE_BACKED_MARKET.to_vec();
-        data.extend_from_slice(bytes_of(&args));
-        let token = Pubkey::from_str_const(TOKEN_PROGRAM);
-        let system = Pubkey::from_str_const(SYSTEM_PROGRAM);
-        let ix = Instruction {
-            program_id: key(&program),
-            accounts: vec![
-                meta(&b.market, false, true),
-                meta(&b.vault, false, true),
-                meta(wallet, true, true),
-                meta(&b.quote_mint, false, false),
-                meta(&self.config_address(), false, false),
-                meta(&b.oracle, false, false),
-                meta(&system, false, false),
-                meta(&token, false, false),
-                meta(&outcome_mint(&program, &b.market, 0), false, true),
-                meta(&outcome_mint(&program, &b.market, 1), false, true),
-            ],
-            data,
-        };
-        let (transaction, last_valid_block_height) = self.finish(wallet, vec![ix]).await?;
-        Ok(UnsignedTransaction {
-            venue_id: "metis".to_string(),
-            kind: IntentKind::CreateMarket,
-            transaction,
-            venue_ref: format!("create:{}", b.market),
-            expires_at: now_unix() + ASSUMED_BLOCKHASH_SECS,
-            required_signers: vec![intent.wallet.clone()],
-            last_valid_block_height: Some(last_valid_block_height),
-            cost: TransactionCost {
-                total_usdc: rust_decimal::Decimal::ZERO,
-                lines: vec![CostLine {
-                    label: "Open Pool".to_string(),
-                    amount_usdc: usdc(seed_target),
-                    note: Some(format!(
-                        "you pay no seed: backers fill an Open Pool of {} USDC on a Meteora curve within {} minutes, or the market is cancelled",
-                        usdc(seed_target),
-                        raise_secs / 60
-                    )),
                 }],
             },
             preview: None,

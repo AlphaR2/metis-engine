@@ -5,6 +5,3 @@ pub mod close_market;
 pub mod forfeit_fees;
 pub mod settle_market;
 pub mod sweep_fees;
-pub mod activate_market;
-pub mod cancel_pending_market;
-pub mod claim_backer;

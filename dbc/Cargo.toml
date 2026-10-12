@@ -1,0 +1,14 @@
+[package]
+name = "metis-dbc"
+version = "0.1.0"
+edition = "2024"
+description = "Open Pool: the types and arithmetic shared by every part of Metis that uses Meteora's Dynamic Bonding Curve"
+
+[dependencies]
+bytemuck = { workspace = true }
+pinocchio = { workspace = true }
+pinocchio-token = { workspace = true }
+pinocchio-associated-token-account = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

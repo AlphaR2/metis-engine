@@ -12,13 +12,13 @@ use metis_core::{
     amm::{
         curve::{cost, priced_shares},
         instructions::place_bet::PlaceBetArgs,
-        state::{MarketStatus, SeedSource, PLACE_BET},
+        state::{MarketStatus, PLACE_BET},
     },
     config::state::{Config, ConfigDials},
     constants::{MAX_PRICE_IMPACT_BPS, QUOTE_DECIMALS},
     settlement::{
         instructions::sweep_fees::{SWEEP_CREATOR, SweepFeesArgs},
-        state::{CLAIM, CLAIM_BACKER, CLAIM_REFUND, SWEEP_FEES},
+        state::{CLAIM, CLAIM_REFUND, SWEEP_FEES},
     },
 };
 use manifest_client::{MANIFEST_PROGRAM_ID, SwapParams, WithdrawParams, swap_instruction, withdraw_instruction};
@@ -287,35 +287,9 @@ impl MetisAdapter {
             }
         };
 
-        // A crowd-seeded market's backers hold the raise's token, and redeem it for their slice of the
-        // escrowed seed shares. `claim_backer` burns all of it, so one instruction is enough.
-        let backer_mint = Pubkey::new_from_array(market.backer_mint.to_bytes());
-        let backer_tokens = if market.seed_source == SeedSource::DbcBackers as u8 && backer_mint != Pubkey::default() {
-            self.rpc.account(&associated_token_account(&wallet, &backer_mint)).await?.map(|d| token_amount(&d)).unwrap_or(0)
-        } else {
-            0
-        };
-        let backer_ix = || {
-            let (m0, m1) = (outcome_mint(&self.settings.program_id, &market_address, 0), outcome_mint(&self.settings.program_id, &market_address, 1));
-            Instruction {
-                program_id: program,
-                accounts: vec![
-                    meta(&market_address, false, true),
-                    meta(&vault, false, true),
-                    meta(&wallet, true, false),
-                    meta(&wallet_usdc, false, true),
-                    meta(&quote_mint, false, false),
-                    meta(&backer_mint, false, true),
-                    meta(&associated_token_account(&wallet, &backer_mint), false, true),
-                    meta(&m0, false, true),
-                    meta(&m1, false, true),
-                    meta(&associated_token_account(&market_address, &m0), false, true),
-                    meta(&associated_token_account(&market_address, &m1), false, true),
-                    meta(&token_program, false, false),
-                ],
-                data: CLAIM_BACKER.to_vec(),
-            }
-        };
+        // A crowd-seeded market's backers redeem their token with `claim_backer` (see dbc.rs).
+        let backer_tokens = self.backer_tokens(&wallet, &market).await?;
+        let backer_ix = || super::dbc::backer_claim_ix(&self.settings.program_id, &market_address, &market, &wallet);
 
         let status = MarketStatus::try_from(market.status).ok();
         let (mut instructions, kind, payout, label) = match (intent.kind, status) {

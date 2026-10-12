@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use metis_core::{
-    amm::state::{Market, MarketStatus, SeedSource},
+    amm::state::{Market, MarketStatus},
     constants::{BOOK_SEED, METADATA_SEED},
 };
 use rust_decimal::Decimal;
@@ -320,10 +320,8 @@ impl VenueAdapter for MetisAdapter {
                 position.open_orders = seat.open_orders;
                 positions.push(position);
             }
-            // A crowd-seeded market's backers hold the raise's token: that is their position. It is
-            // redeemed with the same claim call once the market settles or is cancelled.
-            let backer_mint = Pubkey::new_from_array(market.backer_mint.to_bytes());
-            if market.seed_source == SeedSource::DbcBackers as u8 && backer_mint != Pubkey::default() {
+            // A crowd-seeded market's backers hold the raise's token: that is their position (see dbc.rs).
+            if let Some(backer_mint) = super::dbc::backer_mint(market) {
                 let tokens = balances.get(&backer_mint).copied().unwrap_or(0);
                 if tokens > 0 {
                     let titles = match &titles {
@@ -331,18 +329,7 @@ impl VenueAdapter for MetisAdapter {
                         None => titles.insert(self.rpc.metadata(&program).await?),
                     };
                     let title = titles.get(address).and_then(|m| m.field(0)).and_then(|b| core::str::from_utf8(b).ok()).map(str::to_string);
-                    let mut position = position_of(address, market, ID_YES, tokens, title, wallet, false);
-                    let claimable = matches!(status_of(market), Some(MarketStatus::Settled | MarketStatus::Cancelled));
-                    position.side = "backer".to_string();
-                    position.venue_position_id = Some(format!("{address}:backer"));
-                    position.payout_usdc = None; // what a backer gets depends on the whole escrow; the claim shows it on chain
-                    position.state = match status_of(market) {
-                        Some(MarketStatus::Settled) => PositionState::Claimable,
-                        Some(MarketStatus::Cancelled) => PositionState::Cancelled,
-                        _ => PositionState::Open,
-                    };
-                    position.claim_ref = claimable.then(|| claim_ref(wallet, &address.to_string()));
-                    positions.push(position);
+                    positions.push(super::dbc::backer_position(address, market, tokens, title, wallet));
                 }
             }
         }
@@ -385,7 +372,7 @@ pub(super) fn parse_ref(venue_ref: &str) -> Option<(&str, &str, &str)> {
     Some((parts.next()?, parts.next()?, parts.next()?))
 }
 
-fn position_of(
+pub(super) fn position_of(
     address: &Pubkey,
     market: &metis_core::amm::state::Market,
     side: usize,

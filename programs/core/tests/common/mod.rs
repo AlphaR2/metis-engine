@@ -1207,7 +1207,7 @@ pub fn ix_initialize_backed_market(
     seed_target: u64,
     raise_deadline: i64,
 ) -> Instruction {
-    let args = metis_core::amm::instructions::initialize_market::InitializeBackedMarketArgs {
+    let args = metis_dbc::InitializeBackedMarketArgs {
         nonce,
         num_outcomes: 2,
         condition_kind,

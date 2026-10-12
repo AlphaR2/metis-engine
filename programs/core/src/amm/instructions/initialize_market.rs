@@ -64,38 +64,6 @@ const _: () = assert!(core::mem::size_of::<InitializeMarketArgs>() == 48);
 // makes forgetting a compile error instead of a market with missing mints.
 const _: () = assert!(MAX_OUTCOMES == 2);
 
-/// Arguments of `initialize_backed_market`: the common ones, then what the DBC raise needs.
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable, Debug)]
-pub struct InitializeBackedMarketArgs {
-    pub nonce: u64,
-    pub num_outcomes: u8,
-    pub condition_kind: u8,
-    pub condition_param: u8,
-    pub _padding: [u8; 5],
-    pub platform: [u8; 32],
-    /// The DBC base mint that backers hold. It need not exist yet (the keeper may create the pool
-    /// after the market); activate_market checks it for real.
-    pub backer_mint: [u8; 32],
-    /// What the raise must deliver into the vault, in USDC atoms.
-    pub seed_target: u64,
-    /// Unix seconds. The raise must activate the market by then.
-    pub raise_deadline: i64,
-}
-
-impl InitializeBackedMarketArgs {
-    pub const LEN: usize = core::mem::size_of::<InitializeBackedMarketArgs>();
-
-    pub fn load(bytes: &[u8]) -> Result<&Self, ProgramError> {
-        if bytes.len() != Self::LEN {
-            return Err(ProgramError::InvalidInstructionData);
-        }
-        Ok(from_bytes::<Self>(bytes))
-    }
-}
-
-const _: () = assert!(core::mem::size_of::<InitializeBackedMarketArgs>() == 96);
-
 // The account list below hardcodes one [mint, ata] pair per outcome. If
 // MAX_OUTCOMES ever goes up, this file must be edited by hand: add the extra
 // accounts to the pattern AND to the two arrays built from them. This assert
@@ -103,38 +71,38 @@ const _: () = assert!(core::mem::size_of::<InitializeBackedMarketArgs>() == 96);
 const _: () = assert!(MAX_OUTCOMES == 2);
 
 /// What differs between a creator-seeded market and a DBC-backed one.
-struct Backed {
-    backer_mint: Address,
-    seed_target: u64,
-    raise_deadline: i64,
+pub(crate) struct Backed {
+    pub(crate) backer_mint: Address,
+    pub(crate) seed_target: u64,
+    pub(crate) raise_deadline: i64,
 }
 
 /// The arguments both variants share.
-struct Common {
-    nonce: u64,
-    num_outcomes: u8,
-    condition_kind: u8,
-    condition_param: u8,
-    platform: [u8; 32],
+pub(crate) struct Common {
+    pub(crate) nonce: u64,
+    pub(crate) num_outcomes: u8,
+    pub(crate) condition_kind: u8,
+    pub(crate) condition_param: u8,
+    pub(crate) platform: [u8; 32],
 }
 
 /// The accounts both variants create or read.
-struct Accounts<'a> {
-    market: &'a AccountView,
-    vault: &'a AccountView,
-    creator: &'a AccountView,
-    quote_mint: &'a AccountView,
-    config: &'a AccountView,
-    oracle: &'a AccountView,
-    system_program: &'a AccountView,
-    token_program: &'a AccountView,
-    outcome_mints: [&'a AccountView; MAX_OUTCOMES],
+pub(crate) struct Accounts<'a> {
+    pub(crate) market: &'a AccountView,
+    pub(crate) vault: &'a AccountView,
+    pub(crate) creator: &'a AccountView,
+    pub(crate) quote_mint: &'a AccountView,
+    pub(crate) config: &'a AccountView,
+    pub(crate) oracle: &'a AccountView,
+    pub(crate) system_program: &'a AccountView,
+    pub(crate) token_program: &'a AccountView,
+    pub(crate) outcome_mints: [&'a AccountView; MAX_OUTCOMES],
 }
 
 /// What the creator-seeded variant needs back from the shared part to finish its own work.
-struct Created {
-    seed_per_side: u64,
-    seed_usdc: u64,
+pub(crate) struct Created {
+    pub(crate) seed_per_side: u64,
+    pub(crate) seed_usdc: u64,
 }
 
 /// Accounts:
@@ -252,73 +220,9 @@ pub fn process_initialize_market(accounts: &mut [AccountView], data: &[u8]) -> P
     Ok(())
 }
 
-/// Accounts:
-///   0 market          (writable, PDA)
-///   1 vault           (writable, PDA token account; stays empty until the raise funds it)
-///   2 creator         (signer, writable - pays rent only; the seed comes from the raise)
-///   3 quote_mint
-///   4 config
-///   5 oracle
-///   6 system_program
-///   7 token_program
-///   8 outcome_mint_0  (writable, PDA)
-///   9 outcome_mint_1  (writable, PDA)
-///
-/// Opens a market whose seed will be raised from backers through a Meteora DBC pool, instead of
-/// paid by its creator. It is created `Pending`: no seed shares exist and nobody can bet until
-/// activate_market runs. Needs Config.dbc_backing_enabled.
-pub fn process_initialize_backed_market(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
-    let args = InitializeBackedMarketArgs::load(data)?;
-    let [
-        market,
-        vault,
-        creator,
-        quote_mint,
-        config,
-        oracle,
-        system_program,
-        token_program,
-        outcome_mint_0,
-        outcome_mint_1,
-    ] = accounts
-    else {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    };
-
-    let common = Common {
-        nonce: args.nonce,
-        num_outcomes: args.num_outcomes,
-        condition_kind: args.condition_kind,
-        condition_param: args.condition_param,
-        platform: args.platform,
-    };
-    let accts = Accounts {
-        market,
-        vault,
-        creator,
-        quote_mint,
-        config,
-        oracle,
-        system_program,
-        token_program,
-        outcome_mints: [&*outcome_mint_0, &*outcome_mint_1],
-    };
-    let (state, _) = create_market(
-        &accts,
-        &common,
-        Some(Backed {
-            backer_mint: Address::new_from_array(args.backer_mint),
-            seed_target: args.seed_target,
-            raise_deadline: args.raise_deadline,
-        }),
-    )?;
-    market.try_borrow_mut()?.copy_from_slice(bytes_of(&state));
-    Ok(())
-}
-
 /// Everything creation does except moving the creator's seed: validates, creates the market, the
 /// vault and the outcome mints, and writes the market's state. `backed` is `Some` for a DBC raise.
-fn create_market(a: &Accounts, c: &Common, backed: Option<Backed>) -> Result<(Market, Created), ProgramError> {
+pub(crate) fn create_market(a: &Accounts, c: &Common, backed: Option<Backed>) -> Result<(Market, Created), ProgramError> {
     let Accounts { market, vault, creator, quote_mint, config, oracle, system_program, token_program, outcome_mints } =
         a;
 

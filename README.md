@@ -31,7 +31,7 @@ in the market's fees and result, and carry the risk.
 
   background services
     tools/oracle-keeper   reporters and the settlement crank
-    keepers/meteora       runs each Open Pool: launch, watch, migrate, fund, activate
+    dbc/keeper            runs each Open Pool: launch, watch, migrate, fund, activate
 ```
 
 ## Repository map
@@ -43,7 +43,7 @@ in the market's fees and result, and carry the risk.
 | `authority` | The trust roots (3 roots and a guardian), compiled in per network. |
 | `aggregator` | `metis-api`: the cross-venue API, transaction builders and the Fill Score. |
 | `tools/metis-ops`, `tools/oracle-keeper` | Setup and operator commands; the reporters and the crank. |
-| `keepers/meteora` | The Open Pool service (TypeScript): raise, migration, faucet, status. |
+| **`dbc/`** | **Where Meteora's DBC is used (the Open Pool).** Start at [`dbc/README.md`](dbc/README.md): it explains the flow and lists every file. Holds the shared `metis-dbc` crate and the TypeScript keeper (`dbc/keeper`). |
 | `devnet/` | Scripts to deploy, initialise and verify on devnet. |
 | `localnet/` | A local-validator harness with throwaway keys. |
 | `docs/` | Architecture, formulas, security review, the Open Pool design, deployment guides. |
@@ -54,7 +54,7 @@ in the market's fees and result, and carry the risk.
 cargo build-sbf --manifest-path programs/core/Cargo.toml
 cargo build-sbf --manifest-path programs/oracle/Cargo.toml
 cargo test --workspace
-(cd keepers/meteora && npm ci && npm test)
+(cd dbc/keeper && npm ci && npm test)
 ```
 
 The litesvm tests load `target/deploy/metis_core.so`, so rebuild it after any program change. Some aggregator tests
@@ -63,7 +63,8 @@ execute the transactions it builds against the real compiled program.
 ## Read first
 
 - [`docs/architecture.md`](docs/architecture.md): how the pieces fit, including the demo timers.
-- [`docs/dbc-backer-switch.md`](docs/dbc-backer-switch.md): the Open Pool design and what is proven.
+- [`dbc/README.md`](dbc/README.md): how Metis uses Meteora's DBC (the Open Pool) and where each part lives.
+- [`docs/dbc-backer-switch.md`](docs/dbc-backer-switch.md): the Open Pool design decisions and what is proven.
 - [`docs/security-review.md`](docs/security-review.md): findings and what was checked.
 - [`docs/formulas.md`](docs/formulas.md): the curve and payout maths.
 - [`docs/devnet-setup.md`](docs/devnet-setup.md) and [`docs/deployment.md`](docs/deployment.md): deploying it.

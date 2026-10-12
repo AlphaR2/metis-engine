@@ -6,6 +6,7 @@ use pinocchio::{
 pub mod amm;
 pub mod clob;
 pub mod config;
+pub mod dbc;
 pub mod constants;
 pub mod error;
 pub mod settlement;
@@ -42,16 +43,16 @@ pub fn process_instruction(
         amm::state::PLACE_BET => amm::instructions::place_bet::process_place_bet(accounts, data),
         amm::state::CLOSE_PRIMARY => amm::instructions::close_primary::process_close_primary(accounts, data),
         amm::state::INITIALIZE_BACKED_MARKET => {
-            amm::instructions::initialize_market::process_initialize_backed_market(accounts, data)
+            dbc::initialize_backed_market::process_initialize_backed_market(accounts, data)
         }
         amm::state::ACTIVATE_MARKET => {
-            settlement::instructions::activate_market::process_activate_market(accounts, data)
+            dbc::activate_market::process_activate_market(accounts, data)
         }
         settlement::state::CLAIM_BACKER => {
-            settlement::instructions::claim_backer::process_claim_backer(accounts, data)
+            dbc::claim_backer::process_claim_backer(accounts, data)
         }
         settlement::state::CANCEL_PENDING_MARKET => {
-            settlement::instructions::cancel_pending_market::process_cancel_pending_market(accounts, data)
+            dbc::cancel_pending_market::process_cancel_pending_market(accounts, data)
         }
         settlement::state::SETTLE_MARKET => {
             settlement::instructions::settle_market::process_settle_market(accounts, data)

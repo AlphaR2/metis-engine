@@ -18,6 +18,7 @@ short-timers = []
 localnet = ["metis-authority/localnet", "short-timers"]
 
 [dependencies]
+metis-dbc = { path = "../../dbc" }
 bytemuck = { workspace = true }
 pinocchio = { workspace = true }
 pinocchio-associated-token-account = { workspace = true }
