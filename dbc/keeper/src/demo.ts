@@ -117,7 +117,13 @@ export function startJob(scriptsDir: string, action: JobAction, args: { seed?: n
   const add = (b: Buffer) => { job.output = (job.output + b.toString()).slice(-6000); };
   child.stdout.on("data", add);
   child.stderr.on("data", add);
-  child.on("close", (code) => { job.status = code === 0 ? "done" : "failed"; });
+  // A demo script that has not finished in 8 minutes is stuck (a market normally takes 1 to 3): stop it and say so.
+  const killer = setTimeout(() => {
+    job.output += "\n[stopped: this job ran longer than 8 minutes. Check the worker logs and the RPC.]";
+    job.status = "failed";
+    child.kill("SIGKILL");
+  }, 8 * 60 * 1000);
+  child.on("close", (code) => { clearTimeout(killer); if (job.status === "running") job.status = code === 0 ? "done" : "failed"; });
   child.on("error", (e) => { job.output += String(e); job.status = "failed"; });
   return job;
 }

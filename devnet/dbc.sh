@@ -24,7 +24,8 @@ export RPC_URL KEEPER_KEYPAIR=$D/dbc-keeper.json OPERATOR_KEYPAIR=$D/operator.js
   TOKEN_URI=${TOKEN_URI:-https://metis.example/backer-token.json} DEMO_RUN_DIR=$RUN DEMO_SCRIPTS_DIR=$ENGINE/devnet FAUCET_KEYPAIR=$D/faucet.json
 case ${1:?command} in
   install) npm ci --no-audit --no-fund ;;
-  reserve) npx tsx src/cli.ts reserve --creator "$(P creator)" --nonce "${2:?nonce}" --seed "${3:?seed usdc}" ;;
+  # tee to stderr so a caller that captures stdout (03-markets.sh) still shows the progress lines in its own output
+  reserve) npx tsx src/cli.ts reserve --creator "$(P creator)" --nonce "${2:?nonce}" --seed "${3:?seed usdc}" | tee /dev/stderr ;;
   run) "$0" stop >/dev/null 2>&1 || true
        nohup npx tsx src/cli.ts serve --port "${PORT_DBC:-8090}" --every "${EVERY:-8}" > "$RUN/dbc-keeper.log" 2>&1 & echo $! > "$RUN/dbc-keeper.pid"
        sleep 3; kill -0 "$(cat "$RUN/dbc-keeper.pid")" 2>/dev/null && echo "up   dbc-keeper (log: $RUN/dbc-keeper.log)" || { echo "DOWN dbc-keeper"; tail -5 "$RUN/dbc-keeper.log"; exit 1; } ;;

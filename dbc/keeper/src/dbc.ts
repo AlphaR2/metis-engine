@@ -11,8 +11,18 @@ export const log = (...a: unknown[]) => console.log(new Date().toISOString().sli
 
 export const dbcClient = (env: Env) => new DynamicBondingCurveClient(env.conn, "confirmed");
 
+/** Fails with a clear message instead of hanging when the RPC never answers. */
+export function withTimeout<T>(what: string, ms: number, work: Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} did not finish in ${Math.round(ms / 1000)}s (the RPC is not answering)`)), ms);
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
 export async function send(env: Env, label: string, tx: Transaction, signers: Keypair[]): Promise<string> {
-  const sig = await sendAndConfirmTransaction(env.conn, tx, signers, { commitment: "confirmed" });
+  log(`send ${label}...`);
+  const sig = await withTimeout(label, 90_000, sendAndConfirmTransaction(env.conn, tx, signers, { commitment: "confirmed" }));
   log(`ok   ${label} ${sig.slice(0, 12)}`);
   return sig;
 }
