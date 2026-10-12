@@ -1,50 +1,84 @@
 # Metis
 
-Metis is a robust protocol and infrastructure for prediction markets. We are a meta-level protocol and aggregation layer for fragmented prediction-market liquidity, markets, and execution. The vision is one integration layer through which products can discover markets, access liquidity, route trades, and build prediction-market experiences without having to integrate every venue independently. We are building an "all you need" basket for prediction markets.
+**Liquidity by matching, not by capital.** Metis is an intent exchange for prediction markets. A call is filled by
+finding someone who disagrees, across venues, instead of by a market maker's money.
 
-**Metis is not primarily an AMM.** The in-house AMM in this repo is our own prediction-market primitive. This lets Metis operate its own markets, build out a proper protocol with proper market mechanics, and have skin in the game while the broader protocol aggregates and connects external prediction-market venues.
+Two parts do the work:
+
+- **The Metis market engine** (this repo's on-chain programs): an AMM-priced, pari-mutuel prediction market for
+  football calls, settled by a two-reporter oracle.
+- **The aggregator**: one API that lists the same question from several venues (Panta on mainnet, Metis on devnet),
+  matches them, and scores where a bet is most likely to fill (the **Fill Score**).
+
+**Open Pool** ties them together: instead of a creator or a market maker funding a market, a crowd fills its
+opening pot on a Meteora Dynamic Bonding Curve. When the pool fills, the market opens for betting. Backers share
+in the market's fees and result, and carry the risk.
+
+## How it fits together
 
 ```text
-                    METIS
-          Prediction Market Infrastructure
-                       │
-        ┌──────────────┼──────────────┐
-        │              │              │
-     Discovery       Liquidity      Execution
-        │              │              │
-        └──────────────┼──────────────┘
-                       │
-              ┌────────┴────────┐
-              │                 │
-        External Markets    Metis Markets
-                                          
+  website (companion repo: Metis-Markets)
+        |
+        v
+  aggregator (aggregator/)  ----->  Panta (mainnet)
+        |
+        v
+  Solana devnet
+    programs/core    market AMM: bets, settlement, claims, Open Pool markets
+    programs/oracle  football oracle: two attested reporters must agree
+    Manifest         order books holders trade on after betting closes
+    Meteora DBC      the Open Pool raise, then migration to DAMM v2
+
+  background services
+    tools/oracle-keeper   reporters and the settlement crank
+    keepers/meteora       runs each Open Pool: launch, watch, migrate, fund, activate
 ```
 
-The infrastructure layer is the product; this repo's own market engine is one part of it, not the entire thing.
+## Repository map
 
-## This repo
+| Path | What it is |
+|---|---|
+| `programs/core` | The market program (Pinocchio, no Anchor). Priced by a share-ratio AMM, settled pari-mutuel; outcome shares are SPL tokens. |
+| `programs/oracle` | The football oracle. A result needs two distinct attested reporters to agree; there is a dispute window and a two-root override. |
+| `authority` | The trust roots (3 roots and a guardian), compiled in per network. |
+| `aggregator` | `metis-api`: the cross-venue API, transaction builders and the Fill Score. |
+| `tools/metis-ops`, `tools/oracle-keeper` | Setup and operator commands; the reporters and the crank. |
+| `keepers/meteora` | The Open Pool service (TypeScript): raise, migration, faucet, status. |
+| `devnet/` | Scripts to deploy, initialise and verify on devnet. |
+| `localnet/` | A local-validator harness with throwaway keys. |
+| `docs/` | Architecture, formulas, security review, the Open Pool design, deployment guides. |
 
-`programs/core` is the in-house EMM/AMM — the one deployable Solana program implementing Metis's own market primitive. Trading is priced by a share-ratio geometric AMM (`C(q) = sqrt(Σqᵢ²)`); settlement is pari-mutuel — the winning outcome's holders split the entire pool, proportional to their holdings. See `docs/mvp.md` for the implementation plan and `docs/research.md` for the reasoning behind each decision.
+## Run the tests
 
-Built with [Pinocchio](https://github.com/anza-xyz/pinocchio) (not Anchor). Outcome shares are standard SPL tokens, one mint per outcome per market — buying mints, claiming burns. The vault is a plain SPL token account holding USDC, authority-controlled by the market's own PDA.
-
-
-## Status
-
-Primary market (AMM) and settlement are implemented and SPL-token-based. The MVP-locked mechanisms from `docs/mvp.md` §1.6 are all wired in: `r = 2` curvature, virtual liquidity, the relative trade-size cap plus a forward-only hard price-impact ceiling, and caller-supplied `min_shares_out` (which replaced the old `Config.slippage_limit_bps` check — that field and mechanism are gone). Curve math and payout math have solid unit/property-test coverage; per-instruction litesvm coverage (every rejection path, multi-trade sequences, settlement/claim edge cases) is not yet at the same bar — see `docs/plan.md` item 7 for the open test-work scope.
-
-Secondary market (CLOB) is designed but not started. Settlement authority isa single hardcoded key — a known, deliberately temporary centralization point, tracked as a TODO in `settlement/instructions/settle_market.rs` and as item 1–2 in `docs/plan.md` (multisig, then real oracle plumbing).
-
-See `docs/plan.md` for the full prioritized list of what's next and how bigeach piece is. Everything in that plan and in this repo today is the in-house EMM/AMM primitive — the discovery/liquidity/execution aggregation layer around it is a separate, broader effort this repo doesn't yet cover.
-
-## Common commands
-
-```
-just build-core        # cargo build-sbf, produces target/deploy/metis_core.so
-just test-core          # the full litesvm integration suite (builds first)
-just test <crate>       # e.g. `just test core` for just the unit tests, no VM
-just bench <crate>      # criterion benchmarks
-just verify             # everything
+```bash
+cargo build-sbf --manifest-path programs/core/Cargo.toml
+cargo build-sbf --manifest-path programs/oracle/Cargo.toml
+cargo test --workspace
+(cd keepers/meteora && npm ci && npm test)
 ```
 
-`just test-core` needs `cargo build-sbf` to succeed first, which requires the Solana SBF platform-tools to be installed with permission to create symlinks — on Windows this means Developer Mode (or an elevated shell); it fails with an `os error 1314` otherwise. `just test core` (unit tests only, no VM) has no such requirement and is the fast path for iterating on curve/payout logic.
+The litesvm tests load `target/deploy/metis_core.so`, so rebuild it after any program change. Some aggregator tests
+execute the transactions it builds against the real compiled program.
+
+## Read first
+
+- [`docs/architecture.md`](docs/architecture.md): how the pieces fit, including the demo timers.
+- [`docs/dbc-backer-switch.md`](docs/dbc-backer-switch.md): the Open Pool design and what is proven.
+- [`docs/security-review.md`](docs/security-review.md): findings and what was checked.
+- [`docs/formulas.md`](docs/formulas.md): the curve and payout maths.
+- [`docs/devnet-setup.md`](docs/devnet-setup.md) and [`docs/deployment.md`](docs/deployment.md): deploying it.
+- [`docs/disclosure.md`](docs/disclosure.md): what existed before 14 September 2026 and what is new.
+
+## What is real and what is demo
+
+- **Real:** the programs, the oracle logic, the aggregator, the Open Pool flow (proven on a local validator with the
+  real Meteora programs), and the transactions, which are signed in the user's own wallet.
+- **Demo:** the deployed programs use short timers so a market lives about ten minutes, and match results come from
+  a labelled mock feed. Panta runs on mainnet, everything else on devnet. A live Open Pool migration on devnet has
+  not been run yet.
+
+## Security notes
+
+No private key is stored in this repository. The roots and guardian are compiled in as public keys only; demo hot
+keys exist only on the machine or hosting account that runs the demo. `localnet` builds use throwaway keys and must
+never be deployed to a public cluster (the devnet build script refuses a binary that contains one).

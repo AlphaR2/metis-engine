@@ -38,3 +38,9 @@ test-ledger/
 # Demo keys and run state written by devnet/*.sh (hot keys for the demo only; never commit)
 /devnet/keys-*/
 devnet/keys-devnet/root1.json
+# Scratch written by the localnet harness while it runs (markets, watch lists, mock state)
+/localnet/*.txt
+/localnet/state-*.json
+/localnet/watch*.json
+/localnet/kickoff
+/localnet/t0

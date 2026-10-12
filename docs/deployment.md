@@ -1,6 +1,7 @@
-# Manual deployment: GitHub, Railway, Vercel (all by hand)
+# Deploying the hosted demo: GitHub, Railway, Vercel
 
-Nothing in this document needs you to give anyone a key. You do each step yourself in a dashboard.
+Every step is done by hand in a dashboard. No key ever leaves your own machine except as a variable you paste into your
+own Railway project.
 
 ## The picture
 
@@ -67,12 +68,11 @@ In GitHub Desktop (or `git status`), look at the list of changed files. You must
 
 You **do** need these in `metis-engine`: `Dockerfile`, `Dockerfile.worker`, the whole `devnet/` folder, `keepers/`,
 `authority/src/network.rs` (it holds your four **public** root/guardian addresses, and the build compiles them in),
-`Cargo.lock`, and the `programs`, `tools`, `aggregator` folders. Everything that changed this session goes up.
+`Cargo.lock`, and the `programs`, `tools`, `aggregator` folders. 
 
 ### 2.2 Commit and push both repos
 
 Commit with a message like "Hosted demo", then push. Do this for `metis-engine` and for `Metis-Markets`.
-(I don't commit for you.)
 
 If either repo is public, remember that the code is then public. The keys are not in it.
 
@@ -104,7 +104,7 @@ If either repo is public, remember that the code is then public. The keys are no
    `"ok":true` and `crank`, `keeper-1`, `keeper-2`, `mock-1`, `mock-2` all `true`.
 9. Now delete `devnet/keys-devnet/secrets.b64` from your computer. It has served its purpose.
 
-If the build fails, copy the last 40 lines of the deployment log and send them to me.
+If the build fails, read the last 40 lines of the deployment log: the cause is almost always a missing variable or a wrong Dockerfile path.
 
 ---
 
@@ -119,7 +119,7 @@ If the build fails, copy the last 40 lines of the deployment log and send them t
    | `FEATURES` | `devnet,short-timers` (this compiles your program id and roots into the API, so it finds your market config by itself) |
    | `ENABLED_VENUES` | `panta,metis` |
    | `METIS_RPC_URL` | your Helius devnet URL |
-   | `PANTA_API_KEY` | your Panta key (you paste it; I never see it) |
+   | `PANTA_API_KEY` | your Panta key (paste it into the dashboard; never commit it) |
    | `EXECUTION_ENABLED` | `true` |
    | `MARKET_CREATION_ENABLED` | `true` |
    | `REFRESH_INTERVAL_SECS` | `30` |
@@ -191,10 +191,10 @@ To get the Fill Score matching, make a Metis market with the exact same question
 | Browser (F12) → Console | Whether the site could reach the backend (CORS or wrong URL) |
 | Vercel → project → Logs | Website errors |
 
-Send me the log lines, never the keys.
+Never paste keys into an issue or a chat.
 
 ## After you are done
 
-- Rotate your Helius key (it was shown once in a terminal capture).
+- Rotate any RPC key that was ever printed in a terminal or shared.
 - Delete `secrets.b64` if it is still there.
 - The programs use demo timers: markets live about 10 minutes. This deployment is for the demo, not real money.
