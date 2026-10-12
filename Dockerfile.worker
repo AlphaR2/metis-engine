@@ -11,9 +11,8 @@
 FROM rust:1.98-bookworm AS build
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p metis-ops -p oracle-keeper \
+# (No BuildKit cache mounts: Railway rejects them without a service-specific cache id. Builds are a little slower.)
+RUN cargo build --release --locked -p metis-ops -p oracle-keeper \
       --features metis-ops/devnet,metis-ops/short-timers,oracle-keeper/devnet,oracle-keeper/short-timers \
     && mkdir -p /out && cp target/release/metis-ops target/release/oracle-keeper /out/
 
@@ -29,6 +28,6 @@ RUN cd dbc/keeper && npm ci --no-audit --no-fund
 COPY --from=build /out/metis-ops /out/oracle-keeper ./target/bin-devnet/debug/
 ENV NET=devnet DEMO_KEYS=/data/keys
 # Run as root so a mounted volume at /data is writable; the container holds only devnet demo keys.
-VOLUME /data
+# The /data volume is added in the Railway dashboard (a Dockerfile VOLUME instruction is rejected there).
 EXPOSE 8090
 ENTRYPOINT ["bash", "/app/devnet/worker.sh"]

@@ -12,11 +12,8 @@ WORKDIR /src
 # Metis config address is derived with no further settings. Empty = the default build.
 ARG FEATURES=""
 COPY . .
-# Cache mounts keep the registry and target dir between builds; the binary is copied out because
-# the target dir is not part of the image layer.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p metis-aggregator --bin metis-api ${FEATURES:+--features "$FEATURES"} \
+# No BuildKit cache mounts: Railway rejects them without a service-specific cache id.
+RUN cargo build --release --locked -p metis-aggregator --bin metis-api ${FEATURES:+--features "$FEATURES"} \
     && mkdir -p /out && cp target/release/metis-api /out/metis-api
 
 FROM debian:bookworm-slim AS runtime
