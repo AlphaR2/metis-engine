@@ -340,6 +340,7 @@ mod tests {
             title: None,
             description: None,
             region: None,
+            venue_params: None,
         }
     }
 

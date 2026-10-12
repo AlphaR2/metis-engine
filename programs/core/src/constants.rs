@@ -1,9 +1,16 @@
+#[cfg(all(feature = "mainnet", feature = "short-timers"))]
+compile_error!("`short-timers` must never be combined with `mainnet`");
+
 use solana_address::{Address, address};
 pub const MARKET_SEED: &[u8] = b"market";
 pub const VAULT_SEED: &[u8] = b"vault";
 pub const CONFIG_SEED: &[u8] = b"config";
 pub const OUTCOME_MINT_SEED: &[u8] = b"outcome_mint";
 pub const DELEGATED_AUTHORITY_SEED: &[u8] = b"delegated_authority";
+/// A market's two Manifest order books: [book, market, outcome_index]. Created by close_primary.
+pub const BOOK_SEED: &[u8] = b"book";
+/// A market's question, rubrics and labels: [metadata, market]. Created once, never rewritten.
+pub const METADATA_SEED: &[u8] = b"metadata";
 pub const QUOTE_DECIMALS: u8 = 6;
 
 // Outcome encoding
@@ -12,12 +19,30 @@ pub const QUOTE_DECIMALS: u8 = 6;
 pub const MAX_OUTCOMES: usize = 2;
 pub const OUTCOME_UNRESOLVED: u8 = u8::MAX; // highest u8 value, used as "no winner yet"
 
-// v0.1: For this version, we wil set minimum creator capital cap as a fixed protocol-wide, not creator-chosen. 
-// Hence, Every market pays the same
-pub const MIN_SEED: u64 = 20_000_000; // 20 USDC (6 decimals), no max
+/// Hardcoded floor on Config.market_init_fee, the creator's seed. Config may raise the seed,
+/// never lower it below this.
+pub const MIN_SEED: u64 = 30_000_000; // 30 USDC (6 decimals), no max
+#[cfg(not(feature = "short-timers"))]
 pub const PRIMARY_WINDOW_SECS: i64 = 5 * 60 * 60; // 5 hours before kickoff --  can be changed.
+/// Shortened for the local rehearsal build only (see the `localnet` feature), so a whole
+/// market life fits in minutes. Every other build uses the real value above.
+#[cfg(feature = "short-timers")]
+pub const PRIMARY_WINDOW_SECS: i64 = 120;
 
 /// Curvature is fixed at r = 2 for mvp.
+/// A DBC-backed market's seed may not exceed this (100,000 USDC): a sanity bound, not a product limit.
+pub const MAX_BACKED_SEED: u64 = 100_000_000_000;
+
+/// How long a DBC raise may run before the market it seeds must open or be cancelled.
+#[cfg(not(feature = "short-timers"))]
+pub const MIN_RAISE_SECS: i64 = 20 * 60;
+#[cfg(feature = "short-timers")]
+pub const MIN_RAISE_SECS: i64 = 60;
+#[cfg(not(feature = "short-timers"))]
+pub const MAX_RAISE_SECS: i64 = 2 * 60 * 60;
+#[cfg(feature = "short-timers")]
+pub const MAX_RAISE_SECS: i64 = 600;
+
 pub const CURVATURE_R: u8 = 2;
 
 /// Virtual-liquidity multiple k (docs/mvp.md 1.4): virtual_per_side =
@@ -52,8 +77,12 @@ pub const BPS_DENOMINATOR: u16 = 10_000;
 /// meaningful fraction of every trade. 50 = 0.50%.
 pub const MAX_FEE_PRIMARY_BPS: u16 = 50;
 
-/// Ceiling on secondary-market (CLOB) taker fee.
-pub const MAX_FEE_TAKER_BPS: u16 = 50;
+/// Ceiling on Config.rake_bps - the cut taken from the pot at settlement. 300 = 3.00%.
+pub const MAX_RAKE_BPS: u16 = 300;
+
+/// Ceiling on the protocol's share of a market's fees. The rest goes to the seed holder and the
+/// creator; a compromised root key can't route every fee to the treasury. 5_000 = 50.00%.
+pub const MAX_PROTOCOL_SHARE_BPS: u16 = 5_000;
 
 /// Ceiling on Config.max_in_bps_of_vault. Mirrors docs/research.md 3.4's
 /// "10 pp hard ceiling, never exceeded by any reachable trade" 
@@ -68,33 +97,76 @@ pub const MAX_FEE_TAKER_BPS: u16 = 50;
 pub const MAX_PRICE_IMPACT_BPS: u16 = 1_000;
 
 const _: () = assert!(MAX_FEE_PRIMARY_BPS <= BPS_DENOMINATOR);
-const _: () = assert!(MAX_FEE_TAKER_BPS <= BPS_DENOMINATOR);
+const _: () = assert!(MAX_RAKE_BPS <= BPS_DENOMINATOR);
+const _: () = assert!(MAX_PROTOCOL_SHARE_BPS <= BPS_DENOMINATOR);
+
+// ── Time bounds
+/// Bounds on Config.dispute_secs: how long after the oracle finalises a result settlement must
+/// wait, so a bad result can still be overridden. Too short and there is no time to react; too
+/// long and winners wait for nothing.
+#[cfg(not(feature = "short-timers"))]
+pub const MIN_DISPUTE_SECS: u32 = 15 * 60;
+/// Shortened for the local rehearsal build only (see the `localnet` feature), so a whole
+/// market life fits in minutes. Every other build uses the real value above.
+#[cfg(feature = "short-timers")]
+pub const MIN_DISPUTE_SECS: u32 = 20;
+pub const MAX_DISPUTE_SECS: u32 = 24 * 60 * 60;
+
+/// No finalised result this long after kickoff and anyone can cancel the market, so funds are
+/// never stuck behind an oracle that stopped reporting.
+#[cfg(not(feature = "short-timers"))]
+pub const CANCEL_AFTER_SECS: i64 = 7 * 24 * 60 * 60;
+/// Shortened for the local rehearsal build only (see the `localnet` feature), so a whole
+/// market life fits in minutes. Every other build uses the real value above.
+#[cfg(feature = "short-timers")]
+pub const CANCEL_AFTER_SECS: i64 = 600;
+
+/// How long after settlement or cancellation holders have to claim before the market can be
+/// closed and its dust swept.
+#[cfg(not(feature = "short-timers"))]
+pub const CLAIM_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
+/// Shortened for the local rehearsal build only (see the `localnet` feature), so a whole
+/// market life fits in minutes. Every other build uses the real value above.
+#[cfg(feature = "short-timers")]
+pub const CLAIM_WINDOW_SECS: i64 = 300;
+
+/// How long an operator has to act before the instructions with a fallback open to anyone.
+///
+/// Settling and cancelling are gated to operators, but they protect holders' money, and a market
+/// must never be stuck behind an operator that has vanished. So once one of them has been
+/// possible for this long and nobody has done it, it becomes permissionless again. (Opening the
+/// order books, sweeping the protocol's fees and closing stay gated for good: nobody's money
+/// depends on them.)
+#[cfg(not(feature = "short-timers"))]
+pub const OPERATOR_GRACE_SECS: i64 = 7 * 24 * 60 * 60;
+/// Shortened for the local rehearsal build only (see the `localnet` feature), so a whole
+/// market life fits in minutes. Every other build uses the real value above.
+#[cfg(feature = "short-timers")]
+pub const OPERATOR_GRACE_SECS: i64 = 120;
+
+/// How long a market's creator has to claim their fees after settlement. Then two roots may
+/// forfeit what is left to the treasury (forfeit_creator_fees), with a record kept on the market
+/// and in the transaction's log so a manual settlement is always possible.
+#[cfg(not(feature = "short-timers"))]
+pub const CREATOR_CLAIM_SECS: i64 = 30 * 24 * 60 * 60;
+/// Shortened for the local rehearsal build only (see the `localnet` feature), so a whole
+/// market life fits in minutes. Every other build uses the real value above.
+#[cfg(feature = "short-timers")]
+pub const CREATOR_CLAIM_SECS: i64 = 180;
+
+const _: () = assert!(MIN_DISPUTE_SECS <= MAX_DISPUTE_SECS);
 const _: () = assert!(MAX_PRICE_IMPACT_BPS <= BPS_DENOMINATOR);
 
 
-// Swap this for a real
-// production key (and a real keypair to match) before any real deploy.
-// pub const AUTHORITY: Address = address!("eaZoYS1Ej58sL64S3PtZbo7XS5euS7oTC1CzsEmP6VE");
+// Root authority keys and guardian. One source for every Metis program, chosen per network by
+// the `devnet` / `mainnet` features - see authority/src/network.rs.
+pub use metis_authority::network::{GUARDIAN, ROOT_SIGNERS};
 
-// Root authority keys - same 3 signers as oracle/, so both programs share one trust root
+// ── Cross-program references
+// The oracle's program id and account discriminator come from the oracle crate itself
+// (`oracle::ID`, `oracle::constants::FOOTBALL_SETTLED_DISCRIMINATOR`) - core depends on it, so
+// the two can never be out of step.
 
-pub const ROOT_SIGNERS: [Address; 3] = [
-    address!("UPDTR3Mmf4qQatb5qy8rE7aEw34Jq2AUJknEgbTuw8B"),
-    address!("UPdtRERKVQhyEEFmxTUmmezz1BStBS1wiXn1h74bhRG"),
-    address!("upDTrFkAvEEk2N9JoxbeY6jg1KHJNzu8BAqdf7f2xVc"),
-];
-
-// PLACEHOLDER — must be a real, independently-held keypair before any real deploy, distinct
-// from all three ROOT_SIGNERS. Same address as oracle's GUARDIAN placeholder, same caveat.
-pub const GUARDIAN: Address = address!("eaZoYS1Ej58sL64S3PtZbo7XS5euS7oTC1CzsEmP6VE");
-
-// ── Cross-program references (oracle/) 
-// NOTE: Fix with real value on initial deploy. 
-// oracle is a separate program - reading its accounts is a plain byte-level read (no CPI
-// needed for reads, only writes), but this program has no dependency on oracle's crate, so
-// these values are independently declared here rather than imported. Must be kept in sync by
-// hand with oracle/src/lib.rs's declare_id! and oracle/src/constants.rs's
-// FOOTBALL_SETTLED_DISCRIMINATOR - same "shared logic, not shared data" principle as
-// ROOT_SIGNERS/GUARDIAN above.
-pub const ORACLE_PROGRAM_ID: Address = address!("PorC1q7btDTY3jyrNxCgieXU5a4nGzhchjjnThYM3un");
-pub const ORACLE_FOOTBALL_DISCRIMINATOR: [u8; 8] = [130, 33, 121, 117, 222, 174, 224, 194];
+/// Manifest's core order-book program (Bonasa-Tech/manifest). Outcome tokens trade there after
+/// the primary window; close_primary creates the books by CPI.
+pub const MANIFEST_PROGRAM_ID: Address = address!("MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms");

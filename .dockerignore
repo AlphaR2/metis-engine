@@ -9,3 +9,10 @@ programs/core/keys
 test-ledger
 .surfpool
 *.log
+
+# demo keys and rehearsal state must never enter an image
+devnet/keys-*
+localnet/keys
+localnet/ledger
+**/node_modules
+**/keeper-state.json

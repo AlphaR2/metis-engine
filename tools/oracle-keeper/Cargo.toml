@@ -1,0 +1,53 @@
+[package]
+name = "oracle-keeper"
+version = "0.1.0"
+edition = "2024"
+description = "Reads match results from sports-data providers and reports them to the Metis oracle."
+
+[lib]
+name = "oracle_keeper"
+
+[[bin]]
+name = "oracle-keeper"
+path = "src/main.rs"
+
+[features]
+# Must match the build of the deployed programs: the trust roots (and so the config and authority
+# addresses) are compiled in.
+devnet = ["metis-core/devnet", "metis-oracle/devnet"]
+mainnet = ["metis-core/mainnet", "metis-oracle/mainnet"]
+localnet = ["metis-core/localnet", "metis-oracle/localnet"]
+short-timers = ["metis-core/short-timers", "metis-oracle/short-timers"]
+
+[dependencies]
+# The real oracle types and constants, so the keeper can never drift from the program.
+metis-oracle = { path = "../../programs/oracle", features = ["no-entrypoint"] }
+# The crank reads the market program's accounts and builds its instructions with the program's own
+# types and discriminators, so it can never act on a layout the program doesn't write.
+metis-core = { path = "../../programs/core", features = ["no-entrypoint"] }
+bytemuck = { workspace = true }
+solana-address = { workspace = true }
+solana-instruction = { workspace = true }
+solana-keypair = { workspace = true }
+solana-message = { workspace = true }
+solana-pubkey = { workspace = true, features = ["curve25519"] }
+solana-rpc-client = { workspace = true }
+solana-signer = { workspace = true }
+solana-transaction = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+sha2 = "0.10"
+base64 = "0.22"
+bs58 = "0.5"
+
+[dev-dependencies]
+proptest = { workspace = true }
+litesvm = { workspace = true }
+solana-account = { workspace = true }
+solana-clock = { workspace = true }

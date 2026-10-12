@@ -18,6 +18,7 @@ use utoipa::OpenApi;
         crate::api::v1::catalog::routes::get_market_live,
         crate::api::v1::catalog::routes::list_categories,
         crate::api::v1::catalog::routes::list_venues,
+        crate::api::v1::fill::routes::fill_score,
         crate::api::v1::positions::routes::list_positions,
         crate::api::v1::meta::routes::health,
         crate::api::v1::meta::routes::ready,
@@ -34,6 +35,8 @@ use utoipa::OpenApi;
     ),
     components(schemas(
         crate::errors::ErrorBody,
+        crate::services::fill::FillScore,
+        crate::services::fill::FillOption,
         crate::models::position::Position,
         crate::models::position::PositionState,
         crate::models::position::PositionsResponse,

@@ -1,0 +1,3 @@
+fixture_root: c2a389a6ae70c16db2fbd6234c021b68ddcaa78abefd1d453d97c1c7c72d3ef7
+oracle:       BvY6sNDp228PT5hDxcmwGE21pxgniPQSV3PJr2rJ7A1F
+signature:    42uh81qmLs3B9jhSgZdWsUHzjrhvXGtGY3Bj5oRJTqGqtahGaT4a1FKunPdUn3CMr6nPyZnAmg9yHWrzwUeRsu3F

@@ -1,5 +1,8 @@
 # Metis — Post-MVP Plan
 
+> **Superseded.** The current design is in [architecture.md](architecture.md). This file is kept for the reasoning behind earlier decisions; where it disagrees (fees, settlement, the oracle, the secondary market, who may settle), architecture.md is right.
+
+
 **Status:** the AMM-side MVP gaps from [mvp.md](mvp.md) §1.6 are closed (virtual liquidity, the
 relative-cap + forward-impact trade cap, `min_shares_out`). This is the next batch of work,
 in priority order, each sized by rough volume of work so it can be staffed/scheduled.

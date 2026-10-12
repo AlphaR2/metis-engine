@@ -1,5 +1,8 @@
 # Metis MVP — Implementation Plan
 
+> **Superseded.** The current design is in [architecture.md](architecture.md). This file is kept for the reasoning behind earlier decisions; where it disagrees (fees, settlement, the oracle, the secondary market, who may settle), architecture.md is right.
+
+
 **Status:** early — the previous plan (Phoenix-based secondary market, token-freeze design) was
 retired along with `research/curve-experiment` and the old `docs/research/` notes. See
 [research.md](research.md) for the research decisions this plan implements.

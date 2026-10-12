@@ -1,53 +1,44 @@
 # metis-oracle
 
-A standalone Pinocchio program, genuinely separate from `metis-core` — mirrors how a reference
-implementation treats external price/result oracles as separate programs it CPIs into, not code
-it owns. `settle_market` (in `programs/core`) still checks a single hardcoded
-`constants::AUTHORITY` pubkey today; this crate is where the real oracle this program will
-eventually defer to lives, not yet wired into `settle_market` itself (see `docs/plan.md` item 2
-at the workspace root).
+A standalone Pinocchio program, separate from `metis-core`. It holds match results on chain. The
+market program reads its accounts directly (no CPI) through this crate's own types, so the two can
+never disagree about a layout.
 
-## What's here
+## The result rule
 
-Two subsystems:
+A football match is one `FootballSettled` account, found at a PDA of the fixture's Merkle root
+(which commits to each data provider's own id for the match). It always starts `Scheduled`, with
+the kickoff recorded. Reporters (keys that two roots attested) call `submit_result` with the phase,
+score and penalties they see. **A phase or score is written only when two distinct reporters agree.**
+No single reporter, and no single provider, can decide a result.
 
-**A supermajority + delegated-attestation authority system** (`state/authority.rs`,
-`instructions/authority/`). Three hardcoded root keys (`constants::SUPERMAJORITIES` — vanity
-placeholder addresses, swap for real production keys before any real deploy, same caveat as
-`programs/core`'s own `constants::AUTHORITY`) can act directly, or delegate update rights to other
-addresses via an `IndividualOAuthority` account that requires two distinct root attestations
-before it's considered valid. `initialize_authority` creates the root `OracleAuthority` PDA,
-`attest_authority` lets a root (or an already-attested delegate) vouch for a new candidate,
-`remove_authority` lets a root revoke a delegate and reclaim rent.
+- The phase machine only allows valid steps: `Scheduled → FirstHalf → HalfTime → SecondHalf →
+  Finished`, with an extra-time and penalties branch.
+- The 90-minute (regulation) score is frozen by the program when normal time ends. Markets are
+  judged on it, so extra time and penalties never leak in.
+- Results before kickoff are refused (`ResultBeforeKickoff`).
+- Once `Finished` is agreed it is **immutable**, except for a two-root override (`override_result`:
+  set the result, or void it) within 24 h. An override restarts the dispute clock.
+- `close_oracle` is guarded: 30 days after a result is final or voided, or after kickoff if the match
+  never finished. A market whose oracle account is gone counts as having no result.
 
-**A football-match oracle** (`instructions/football/`) — one `MarketKind` variant of what's meant
-to eventually be several (`MarketKind::Price` exists in the enum but has no handler yet).
-`FootballSettled` tracks a match by its fixture Merkle root (the account's own PDA identity),
-bitpacked score/penalties, and a match-phase state machine (`Scheduled` → `FirstHalf` → `HalfTime`
-→ `SecondHalf` → `Finished`, with an extra-time/penalties branch) that only allows valid
-transitions.
+## Trust
+
+Three root signers and a guardian, hardcoded per network in `authority/src/network.rs` (shared with
+`metis-core`). Roots attest reporters (two distinct roots complete an attestation). One root can
+`pause`; `unpause` needs the guardian plus two distinct roots in one transaction. While paused,
+nothing that changes a result or who may report runs.
 
 ## Instructions
 
-`CreateOracle`, `UpdateOracle`, `InitializeAuthority`, `AttestAuthority`, `RemoveAuthority` — see
-`src/instructions/mod.rs`'s `POracle` enum and `OracleInstructionSchema` for the exact account
-lists per instruction.
+`create_oracle`, `submit_result`, `override_result`, `close_oracle`, `initialize_authority`,
+`attest_authority`, `remove_authority`, `pause`, `unpause`. See `src/instructions/mod.rs` (`POracle`)
+for the account lists.
 
-## IDL
+## Tests
 
-`build.rs` uses [Codama](https://github.com/codama-idl/codama) to generate `../idl/oracle.json` at
-build time from the `#[derive(CodamaAccount)]`/`#[derive(CodamaType)]`/`#[derive(CodamaInstructions)]`
-annotations in `state/` and `instructions/`.
-
-## Test coverage
-
-Covered today: create/update oracle happy paths, one negative case (an unattested caller cannot
-create), the full `initialize → attest (both roots) → remove` authority lifecycle end-to-end, and
-pure unit tests for `IndividualOAuthority::record_attestation`, `OracleAuthority::is_supermajority`,
-and `CFootballMatchPhase::can_transition_to`.
-
-Not yet covered: most of `process_attest_authority`'s validation surface beyond the root-attester
-happy path (wrong PDAs, unauthorized attesters, double-attestation, the non-root-attester branch),
-`process_remove_authority` beyond its one happy path, and the individual guard-branch rejections
-on `create_oracle`/`update_oracle` in isolation. Tracked as its own item in the workspace root's
-`docs/plan.md`.
+`cargo build-sbf --manifest-path programs/oracle/Cargo.toml` first (the litesvm suite loads
+`target/deploy/oracle.so`), then `cargo test -p metis-oracle`: quorum (one report does not finalise,
+two agreeing do, two disagreeing do not), phase transitions, the frozen regulation score,
+immutability, override and void, pause, close, and the authority lifecycle. The keeper's end-to-end
+tests (`tools/oracle-keeper/tests/e2e.rs`) run the real program against provider-shaped data.

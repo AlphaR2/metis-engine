@@ -12,6 +12,7 @@ use std::time::Duration;
 use crate::config::VenueConfig;
 use crate::services::VenueAdapter;
 use crate::services::jupiter::JupiterAdapter;
+use crate::services::metis::{MetisAdapter, MetisSettings};
 use crate::services::panta::{ChainSource, PantaAdapter};
 
 /// Per-venue pacing and limits for the refresh. Every field can be set per venue from the
@@ -82,7 +83,8 @@ pub fn build_venues(configs: &[VenueConfig]) -> Vec<RegisteredVenue> {
                 None
             }
             Some(adapter) => {
-                if config.api_key.is_empty() {
+                // Metis is read from chain: there is no API behind it, so no key to be missing.
+                if config.api_key.is_empty() && config.kind != "metis" {
                     tracing::warn!("{}: no API key set ({}_API_KEY) - every call will fail", config.id, config.env_prefix());
                 }
                 Some(RegisteredVenue { adapter, settings: VenueSettings::from_config(config) })
@@ -114,8 +116,40 @@ fn build_adapter(config: &VenueConfig) -> Option<Arc<dyn VenueAdapter>> {
             )))
         }
         "jupiter" => Some(Arc::new(JupiterAdapter::new(base_url("https://api.jup.ag/prediction/v1"), config.api_key.clone()))),
+        "metis" => metis_adapter(config),
         _ => None,
     }
+}
+
+/// Reads a Metis venue's settings. A malformed address or amount is a boot-time error, not a venue
+/// that silently points at the wrong place: `None` leaves the venue disabled with the reason logged.
+fn metis_adapter(config: &VenueConfig) -> Option<Arc<dyn VenueAdapter>> {
+    let program_id = match config.option("PROGRAM_ID") {
+        Some(text) => text.parse().map_err(|_| tracing::error!("{}: PROGRAM_ID '{text}' is not a valid address", config.id)).ok()?,
+        None => solana_pubkey::Pubkey::new_from_array(metis_core::ID.to_bytes()),
+    };
+    let metis_config = match config.option("CONFIG") {
+        Some(text) => Some(text.parse().map_err(|_| tracing::error!("{}: CONFIG '{text}' is not a valid address", config.id)).ok()?),
+        None => None,
+    };
+    let reference_deposit = match config.option("REFERENCE_USDC") {
+        Some(text) => text
+            .parse::<rust_decimal::Decimal>()
+            .ok()
+            .and_then(crate::services::metis::view::to_atoms)
+            .filter(|atoms| *atoms > 0)
+            .or_else(|| {
+                tracing::error!("{}: REFERENCE_USDC '{text}' is not a positive amount with at most 6 decimals", config.id);
+                None
+            })?,
+        None => MetisSettings::DEFAULT_REFERENCE_DEPOSIT,
+    };
+    Some(Arc::new(MetisAdapter::new(MetisSettings {
+        rpc_url: config.option("RPC_URL").unwrap_or_else(|| "https://api.devnet.solana.com".to_string()),
+        program_id,
+        config: metis_config,
+        reference_deposit,
+    })))
 }
 
 #[cfg(test)]
@@ -139,6 +173,29 @@ mod tests {
         let built = build_venues(&[config("panta", &[]), config("jupiter", &[]), config("nosuchvenue", &[])]);
         let ids: Vec<&str> = built.iter().map(|v| v.adapter.id()).collect();
         assert_eq!(ids, ["panta", "jupiter"]);
+    }
+
+    #[test]
+    fn metis_builds_with_defaults_and_needs_no_api_key() {
+        let mut cfg = config("metis", &[]);
+        cfg.api_key = String::new();
+        let built = build_venues(&[cfg]);
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].adapter.id(), "metis");
+    }
+
+    #[test]
+    fn metis_takes_its_deployment_from_the_environment() {
+        let program = solana_pubkey::Pubkey::new_unique().to_string();
+        let cfg = config("metis", &[("PROGRAM_ID", &program), ("CONFIG", &program), ("REFERENCE_USDC", "25.5"), ("RPC_URL", "http://localhost:8899")]);
+        assert_eq!(build_venues(&[cfg]).len(), 1);
+    }
+
+    #[test]
+    fn a_malformed_metis_setting_disables_the_venue_instead_of_pointing_it_somewhere_wrong() {
+        for (name, bad) in [("PROGRAM_ID", "not-an-address"), ("CONFIG", "12345"), ("REFERENCE_USDC", "ten"), ("REFERENCE_USDC", "0"), ("REFERENCE_USDC", "1.0000001")] {
+            assert!(build_venues(&[config("metis", &[(name, bad)])]).is_empty(), "{name}={bad} must not build");
+        }
     }
 
     #[test]

@@ -1,0 +1,37 @@
+[package]
+name = "metis-ops"
+version = "0.1.0"
+edition = "2024"
+description = "Deploy-time and operator commands for the Metis programs: set up the trust accounts, attest operators, create markets."
+
+[lib]
+name = "metis_ops"
+
+[[bin]]
+name = "metis-ops"
+path = "src/main.rs"
+
+[features]
+# Must match the build of the deployed programs: the trust roots (and so the config and authority
+# addresses) are compiled in.
+devnet = ["metis-core/devnet", "metis-oracle/devnet"]
+mainnet = ["metis-core/mainnet", "metis-oracle/mainnet"]
+localnet = ["metis-core/localnet", "metis-oracle/localnet"]
+short-timers = ["metis-core/short-timers", "metis-oracle/short-timers"]
+
+[dependencies]
+metis-core = { path = "../../programs/core", features = ["no-entrypoint"] }
+metis-oracle = { path = "../../programs/oracle", features = ["no-entrypoint"] }
+bytemuck = { workspace = true }
+solana-instruction = { workspace = true }
+solana-keypair = { workspace = true }
+solana-message = { workspace = true }
+solana-pubkey = { workspace = true, features = ["curve25519"] }
+solana-rpc-client = { workspace = true }
+solana-signer = { workspace = true }
+solana-transaction = { workspace = true }
+tokio = { workspace = true }
+base64 = "0.22"
+serde_json = { workspace = true }
+solana-rpc-client-api = "4.2.2"
+manifest-client = { git = "https://github.com/Bonasa-Tech/manifest", rev = "d04b7aa90b098ba64ebcdf398e9a24d89a9114d8" }

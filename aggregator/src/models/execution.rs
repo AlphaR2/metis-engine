@@ -210,6 +210,14 @@ pub struct CreateMarketIntent {
     pub title: Option<String>,
     pub description: Option<String>,
     pub region: Option<String>,
+    /// Venue-specific extras, for venues whose markets need more than the fields above. Metis takes
+    /// `oracle` (the football oracle account, also accepted as a `sources_of_truth` entry
+    /// `oracle:<address>`), `condition` (`home_win`, `away_win`, `draw`, `both_teams_score` or
+    /// `total_goals_over:<n>`), `label_yes`, `label_no`, `rubric_no`, `league`, and `step`:
+    /// `create` (default) opens the market, then `metadata` (with `market`) writes its text.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    pub venue_params: Option<serde_json::Value>,
 }
 
 /// `venue_ref` for a pending claim, on any venue: `claim:<owner>:<what is claimed>`.

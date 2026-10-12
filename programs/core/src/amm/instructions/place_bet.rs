@@ -10,10 +10,11 @@ use pinocchio_token::instructions::{MintTo, TransferChecked};
 
 use crate::{
     amm::curve::{cost, priced_shares, quote_buy},
+    amm::quote::fee_of,
     amm::state::{MARKET_DISCRIMINATOR, Market, MarketStatus},
     config::state::{CONFIG_DISCRIMINATOR, Config},
     constants::{
-        CONFIG_SEED, GUARDIAN, MARKET_SEED, MAX_OUTCOMES, MAX_PRICE_IMPACT_BPS,
+        MARKET_SEED, MAX_OUTCOMES, MAX_PRICE_IMPACT_BPS,
         OUTCOME_MINT_SEED, QUOTE_DECIMALS,
     },
     error::MetisError,
@@ -117,18 +118,8 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
         return Err(ProgramError::IncorrectProgramId);
     }
 
-    // load in config to get things started
-    let config_seeds: [&[u8]; 2] = [CONFIG_SEED, GUARDIAN.as_ref()];
-    let (config_pda, _) = Address::derive_program_address(&config_seeds, &crate::ID)
-        .ok_or(ProgramError::InvalidSeeds)?;
-
-    validation::require_addresses_match(config.address(), &config_pda, MetisError::InvalidPda)?;
-    validation::require_initialized_and_owned(
-        config,
-        &crate::ID,
-        false,
-        MetisError::InvalidConfigAccount,
-    )?;
+    validation::require_config_account(config, false)?;
+    validation::require_not_paused(config)?;
 
     // get trade-cap protection params
     let max_in_bps_of_vault = {
@@ -136,13 +127,13 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
         let config_state =
             validation::unpack::<Config>(&config_data, MetisError::InvalidConfigAccount)?;
         validation::require_discriminator(config_state.discriminator, CONFIG_DISCRIMINATOR)?;
-        config_state.max_in_bps_of_vault
+        config_state.dials.max_in_bps_of_vault
     };
 
     // Read the market, run the curve, and work out everything we need before
     // touching any account. The borrow is dropped at the end of this block so
     // we can write back to the market afterwards.
-    let (delta, new_outcome_shares, new_total_collected, market_bump, creator, nonce) = {
+    let (delta, new_outcome_shares, new_total_collected, new_fees_accrued, market_bump, creator, nonce) = {
         let market_data = market.try_borrow()?;
         let market_state: &Market = from_bytes(&market_data);
 
@@ -188,17 +179,26 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
         let priced = priced_shares(&market_state.outcome_shares, market_state.virtual_per_side)
             .ok_or(ProgramError::ArithmeticOverflow)?;
 
+        // The fee comes off the deposit BEFORE the curve sees it, using the rate this market was
+        // created with (not today's Config). Only the net amount buys shares and enters the pot;
+        // the fee sits in the vault beside the pot and is swept at settlement.
+        let fee = fee_of(args.deposit_amount, market_state.fee_bps);
+        let net = args.deposit_amount.checked_sub(fee).ok_or(ProgramError::ArithmeticOverflow)?;
+        if net == 0 {
+            return Err(MetisError::PaymentTooSmall.into());
+        }
+
         // Trade-size cap, measured against priced depth rather than raw
         // vault balance (docs/mvp.md 1.2/1.6) — scales with the market's
         // true curve depth, real + virtual, not just dollars sitting in the
         // vault. Early on this is what stops a whale swinging the whole
-        // market in one shot.
-        if max_in_bps_of_vault > 0 {
+        // market in one shot. Config guarantees the cap is never 0 (off).
+        {
             let depth = cost(&priced);
             // get the max amount allowed to be deposited in the market based on the max_in_bps_of_vault
             // already it is expected that this is calculated 
             let cap = (depth * max_in_bps_of_vault as u128) / 10_000u128;
-            if (args.deposit_amount as u128) > cap {
+            if (net as u128) > cap {
                 return Err(MetisError::TradeCapExceeded.into());
             }
         }
@@ -206,8 +206,7 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
         // The curve, executed once: gives the real share delta, the
         // execution price, and the resulting price impact off the same
         // transition — no separate re-derivation for each check below.
-        let quote = quote_buy(&priced, outcome_index, args.deposit_amount)
-            .ok_or(MetisError::PaymentTooSmall)?;
+        let quote = quote_buy(&priced, outcome_index, net).ok_or(MetisError::PaymentTooSmall)?;
 
         let delta = quote.shares_received;
 
@@ -231,13 +230,18 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
             .ok_or(ProgramError::ArithmeticOverflow)?;
         let new_total_collected = market_state
             .total_collected
-            .checked_add(args.deposit_amount)
+            .checked_add(net)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        let new_fees_accrued = market_state
+            .fees_accrued
+            .checked_add(fee)
             .ok_or(ProgramError::ArithmeticOverflow)?;
 
         (
             delta,
             new_outcome_shares,
             new_total_collected,
+            new_fees_accrued,
             market_state.bump,
             market_state.creator,
             market_state.nonce,
@@ -258,9 +262,11 @@ pub fn process_place_bet(accounts: &mut [AccountView], data: &[u8]) -> ProgramRe
         let market_state: &mut Market = bytemuck::from_bytes_mut(&mut market_data);
         market_state.outcome_shares = new_outcome_shares;
         market_state.total_collected = new_total_collected;
+        market_state.fees_accrued = new_fees_accrued;
     }
 
-    // Money in. total_collected above and this transfer must always match
+    // Money in: the gross deposit. What lands in the vault is always total_collected + fees_accrued
+    // - the pot plus the fees - which is exactly what settlement's solvency check relies on.
 
     TransferChecked::new(
         bettor_quote_ata,

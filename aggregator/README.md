@@ -6,6 +6,32 @@ network, serves them by category, and ranks them by price, liquidity and executi
 It discovers, prices and recommends, and can **build** (never sign or broadcast) buy, claim and
 market-creation transactions for the caller's wallet. Set `MODE=read` to switch building off and serve a read-only catalog.
 
+
+### Creating a Metis market
+
+`POST /execution/markets` with `venue_id: "metis"` builds two unsigned transactions, one per call,
+because a market's text does not fit beside the market in one packet:
+
+1. `venue_params.step` omitted or `"create"`: `initialize_market`. Needs `question`,
+   `resolution_rule` (the YES rubric), `category`, `wallet` (the creator, who pays the seed), and in
+   `venue_params`: `oracle` (an existing, scheduled football oracle; also accepted as a
+   `sources_of_truth` entry `oracle:<address>`), `condition` (`home_win`, `away_win`, `draw`,
+   `both_teams_score`, `total_goals_over:<n>`), `rubric_no`, `label_yes`, `label_no`, optional `league`
+   and `nonce`. The kickoff comes from the oracle; `start_time`, `end_time` and `resolution_time` are
+   not used. The response's `venue_ref` is `create:<market>`.
+2. After the first lands: the same body with `venue_params.step = "metadata"` and
+   `venue_params.market = <market>` writes the text (creator only, once).
+
+The text is checked against the program's limits before anyone is asked to sign.
+
+### Prices and the order books
+
+After betting closes a market trades on its Manifest books. Its catalog price is the break-even
+probability of the cheapest ask; when nobody is selling a side, that side's price is `null` rather
+than a made-up number. A maker's deposited slices and resting asks count in `/v1/positions`
+(`open_orders`), and a claim withdraws whatever the maker has parked on the books in the same
+transaction (slices still offered in resting orders must be cancelled first).
+
 ## The `/v1` API: events
 
 An **event** is our own aggregation of markets about one real-world subject: a match, one season of a
@@ -186,6 +212,42 @@ Notes from verifying these live:
 - **Jupiter rate-limits aggressively.** Category chains run one at a time per venue, paced
   (`JUPITER_MAX_CONCURRENT_CHAINS`, `JUPITER_MIN_REQUEST_GAP_MS`). A 429 is treated as
   backpressure and never marks the venue unhealthy. Venues refresh concurrently with each other.
+
+### The Metis venue
+
+`metis` is this project's own market program, and unlike Panta and Jupiter it has **no HTTP API**:
+its accounts are the catalog. `services/metis/` reads them over JSON-RPC (`getProgramAccounts` per
+account type, filtered by size and discriminator), decoding with the program's own types (`metis-core`
+is linked as a library, so the adapter reads exactly the layouts the program writes and prices bets
+with exactly the code it runs).
+
+- **Honest prices.** The program mints shares off a curve with virtual liquidity but pays winners
+  from the real pot, so the curve's own probability is not the odds. Every price and size the venue
+  reports is the **payout-based** one: a quote's `effective_shares_or_size` is what the bet pays if
+  it wins and `avg_price` is the break-even probability, so size times price is the amount staked
+  and means the same thing as on venues whose every share pays $1. The catalog's `yes_price` /
+  `no_price` are quoted for a stated bet size (`METIS_REFERENCE_USDC`, in `extra.price_basis_usdc`).
+- **Two phases.** Until betting closes, shares are bought from the program (`place_bet`). After
+  that the pot is final and holders trade on Manifest order books, one per outcome, created by the
+  program's `close_primary` at addresses derived from the market. The adapter prices buys and sells
+  by walking the real books in exact integer arithmetic (rounding against the trader), and builds a
+  single Manifest swap for either. A book holding *global* orders isn't routed.
+- **Every transaction is checked against the program, not just against our expectations.** The
+  adapter's tests execute what it builds against the compiled core and Manifest programs in litesvm:
+  a buy delivers exactly the quoted shares, a claim pays exactly the amount shown, a sale returns
+  what the book said, and the slippage floor is enforced on chain. They need
+  `target/deploy/metis_core.so` and `manifest.so` (`just build-core fetch-manifest`) and skip loudly
+  without them.
+- **Limits worth knowing.** Shares a maker has deposited into a Manifest seat aren't counted in
+  positions (they sit in Manifest's vault until withdrawn). A wallet's cost isn't on chain, so
+  `avg_price_usdc` and pnl are `None`. `resolution_time` is an estimate (kickoff + 4 h): the oracle
+  decides when a match is over. The venue contract tests replay HTTP fixtures, which don't apply
+  here; the adapter's own tests run the same checks (unique ids, prices in [0, 1], close before
+  resolve) against a mock RPC node serving real account bytes.
+
+Configuration: `METIS_RPC_URL`, `METIS_PROGRAM_ID`, `METIS_CONFIG`, `METIS_REFERENCE_USDC` (see
+`.env.example`). Build with `--features devnet` or `mainnet` so the default Config address matches
+the deployed program.
 
 ## Venue integration
 

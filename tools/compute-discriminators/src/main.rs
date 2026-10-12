@@ -38,9 +38,17 @@ fn main() {
         "pub const DELEGATED_AUTHORITY_DISCRIMINATOR: [u8; 8] = {:?};",
         discriminator("account:DelegatedAuthority")
     );
+    println!(
+        "pub const MARKET_METADATA_DISCRIMINATOR: [u8; 8] = {:?};",
+        discriminator("account:MarketMetadata")
+    );
 
     println!();
     println!("// ── Instruction discriminators ───────────────────────────────────────");
+    for name in ["initialize_backed_market", "activate_market", "claim_backer", "cancel_pending_market"] {
+        println!("pub const {}: [u8; 8] = {:?};", name.to_uppercase(), discriminator(&format!("global:{name}")));
+    }
+
     println!(
         "pub const INITIALIZE_MARKET: [u8; 8] = {:?};",
         discriminator("global:initialize_market")
@@ -73,6 +81,23 @@ fn main() {
         "pub const REMOVE_AUTHORITY:  [u8; 8] = {:?};",
         discriminator("global:remove_authority")
     );
+    for (name, ix) in [
+        ("UPDATE_CONFIG_CRITICAL", "update_config_critical"),
+        ("PAUSE", "pause"),
+        ("UNPAUSE", "unpause"),
+        ("CLOSE_PRIMARY", "close_primary"),
+        ("SET_METADATA", "set_metadata"),
+        ("SWEEP_FEES", "sweep_fees"),
+        ("CANCEL_MARKET", "cancel_market"),
+        ("CLAIM_REFUND", "claim_refund"),
+        ("CLOSE_MARKET", "close_market"),
+        ("FORFEIT_CREATOR_FEES", "forfeit_creator_fees"),
+    ] {
+        println!(
+            "pub const {name}: [u8; 8] = {:?};",
+            discriminator(&format!("global:{ix}"))
+        );
+    }
 
     // oracle/ account discriminators - paste into oracle/src/constants.rs
     println!();

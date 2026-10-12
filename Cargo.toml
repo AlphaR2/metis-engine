@@ -25,7 +25,7 @@ pinocchio-associated-token-account = "0.4.0"
 litesvm = "0.16.0"
 litesvm-utils = "0.4.0"
 shank = "0.4.9"
-bytemuck = { version = "1.25.2", features = ["derive"] }
+bytemuck = { version = "1.25.2", features = ["derive", "min_const_generics"] }
 proptest = "1.11.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -55,7 +55,7 @@ sqlx = { version = "0.8", default-features = false, features = [
     "uuid",
     "migrate",
     "json",
-] }
+]}
 
 
 [profile.release]

@@ -64,7 +64,7 @@ pub fn process_claim(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResul
     }
 
     // Read everything we need from the market in one go, then drop the borrow.
-    let (winning_outcome, total_collected, all_winning_shares, market_bump, creator, nonce) = {
+    let (winning_outcome, payout_pool, all_winning_shares, market_bump, creator, nonce) = {
         let market_data = market.try_borrow()?;
         let market_state: &Market = from_bytes(&market_data);
 
@@ -88,7 +88,9 @@ pub fn process_claim(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResul
 
         (
             winning_outcome,
-            market_state.total_collected,
+            // What settlement set aside for winners: the pot minus the rake. Fees were never in
+            // the pot and are swept separately.
+            market_state.payout_pool,
             // The winning side's total, frozen when the market settled.
             //
             // This is the number every payout divides by, and it MUST come
@@ -133,7 +135,7 @@ pub fn process_claim(accounts: &mut [AccountView], _data: &[u8]) -> ProgramResul
         return Err(MetisError::AlreadyClaimed.into());
     }
 
-    let payout = compute_payout(winning_shares, total_collected, all_winning_shares);
+    let payout = compute_payout(winning_shares, payout_pool, all_winning_shares);
 
     // Burn first, pay second. Burning is what makes claiming once-only: the
     // tokens are gone, so a repeat call finds a zero balance and stops above.

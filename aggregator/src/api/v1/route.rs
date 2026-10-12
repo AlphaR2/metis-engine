@@ -5,7 +5,7 @@ use axum::routing::{get, post};
 
 use crate::state::AppState;
 
-use super::{catalog, discovery, execution, meta, positions};
+use super::{catalog, discovery, execution, fill, meta, positions};
 
 /// Builds the full set of routes this service serves, unmounted (no state, no layers yet -
 /// `app::run` attaches those).
@@ -16,6 +16,7 @@ pub fn configure() -> Router<AppState> {
         .route("/v1/markets", get(catalog::routes::list_markets))
         .route("/v1/markets/{venue_id}/{venue_market_id}", get(catalog::routes::get_market))
         .route("/v1/markets/{venue_id}/{venue_market_id}/live", get(catalog::routes::get_market_live))
+        .route("/v1/fill-score", get(fill::routes::fill_score))
         .route("/v1/categories", get(catalog::routes::list_categories))
         .route("/v1/venues", get(catalog::routes::list_venues))
         .route("/v1/positions", get(positions::routes::list_positions))

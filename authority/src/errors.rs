@@ -24,4 +24,8 @@ pub trait AuthorityErrors: Copy + Into<ProgramError> {
     fn attestation_complete() -> Self;
     /// A non-root attester tried to finish off a candidate no root has touched yet.
     fn missing_root_attestation() -> Self;
+    /// The program is paused: nothing that changes who is trusted may run.
+    fn paused() -> Self;
+    /// Unpause was called without the guardian plus the required number of distinct root signers.
+    fn unpause_signatures_missing() -> Self;
 }

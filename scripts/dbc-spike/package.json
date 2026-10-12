@@ -1,0 +1,16 @@
+{
+  "name": "metis-dbc-spike",
+  "private": true,
+  "type": "module",
+  "description": "Proves, against the real Meteora programs on a local validator, that a DBC raise can fund a Metis market's vault.",
+  "scripts": { "spike": "tsx spike.ts" },
+  "dependencies": {
+    "@meteora-ag/cp-amm-sdk": "1.5.1",
+    "@meteora-ag/dynamic-bonding-curve-sdk": "1.5.13",
+    "@solana/spl-token": "^0.4.0",
+    "@solana/web3.js": "^1.98.0",
+    "bn.js": "^5.2.1",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

@@ -3,8 +3,14 @@ name = "metis-authority"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Picks the network's trust roots in src/network.rs. No feature = localnet/tests.
+devnet = []
+mainnet = []
+localnet = []
 
 [dependencies]
+solana-address = { workspace = true }
 pinocchio = { workspace = true }
 pinocchio-system = { workspace = true }
 bytemuck = { workspace = true }

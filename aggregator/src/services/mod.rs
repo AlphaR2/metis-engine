@@ -1,11 +1,13 @@
 //! Business logic - internal domain services (`matching`, `routing`), the pure numeric engines
-//! backing them (`maths`), and per-vendor venue integrations (`panta`, `jupiter`), each
+//! backing them (`maths`), and per-vendor venue integrations (`panta`, `jupiter`, `metis`), each
 //! split into `service.rs` (business logic, including any side/venue-specific trading decisions)
 //! + `client.rs` (raw HTTP/wire calls only).
 
+pub mod fill;
 pub mod jupiter;
 pub mod llm;
 pub mod maths;
+pub mod metis;
 pub mod panta;
 pub mod positions;
 pub mod registry;

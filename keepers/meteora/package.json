@@ -1,0 +1,15 @@
+{
+  "name": "metis-meteora-keeper",
+  "private": true,
+  "type": "module",
+  "description": "Runs DBC-backed Metis markets: launches each market's Meteora pool, watches the raise, migrates, funds the vault and activates the market.",
+  "scripts": { "keeper": "tsx src/cli.ts", "typecheck": "tsc --noEmit", "test": "tsx --test test/*.test.ts" },
+  "dependencies": {
+    "@meteora-ag/cp-amm-sdk": "1.5.1",
+    "@meteora-ag/dynamic-bonding-curve-sdk": "1.5.13",
+    "@solana/spl-token": "^0.4.0",
+    "@solana/web3.js": "^1.98.0",
+    "bn.js": "^5.2.1"
+  },
+  "devDependencies": { "@types/bn.js": "^5.1.0", "@types/node": "^22.0.0", "tsx": "^4.0.0", "typescript": "^5.0.0" }
+}

@@ -9,11 +9,8 @@ use pinocchio::{
 use pinocchio_system::instructions::CreateAccount;
 
 use crate::{
-    config::state::{CONFIG_DISCRIMINATOR, Config},
-    constants::{
-        CONFIG_SEED, GUARDIAN, MAX_FEE_PRIMARY_BPS, MAX_OUTCOMES,
-        MAX_PRICE_IMPACT_BPS, MAX_VIRTUAL_LIQUIDITY_MULTIPLE, MIN_SEED, ROOT_SIGNERS,
-    },
+    config::state::{CONFIG_DISCRIMINATOR, Config, ConfigDials},
+    constants::{CONFIG_SEED, GUARDIAN, ROOT_SIGNERS},
     error::MetisError,
     validation,
 };
@@ -21,13 +18,9 @@ use crate::{
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct InitializeConfigArgs {
-    pub market_init_fee: u64,
-    pub virtual_liquidity_multiple: u64,
-    pub fee_bps: u16,
-    pub max_in_bps_of_vault: u16,
+    pub dials: ConfigDials,
     pub quote_mint: Address,
-    pub max_outcomes: u8,
-    pub _padding: [u8; 3],
+    pub treasury: Address,
 }
 
 impl InitializeConfigArgs {
@@ -41,60 +34,45 @@ impl InitializeConfigArgs {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<InitializeConfigArgs>() == 56);
+const _: () = assert!(core::mem::size_of::<InitializeConfigArgs>() == 104);
 
+/// Accounts:
+///   0 payer       (signer, writable - a root signer, pays rent)
+///   1 second_root (signer - a different root signer)
+///   2 system_program
+///   3 config      (writable, PDA [config, GUARDIAN])
+///
+/// Two root signers, not one: this is the first write of quote_mint and treasury, the same
+/// fields update_config_critical guards with two signatures. With one, whichever single key
+/// called first would decide where every fee is paid.
 pub fn process_initialize_config(accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let args = InitializeConfigArgs::load(data)?;
 
-    let [authority, system_program, config] = accounts else {
+    let [payer, second_root, system_program, config] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    validation::require_signer(authority, MetisError::AuthorityMustSign)?;
-    validation::require_writable(authority, MetisError::AccountNotWritable)?;
+    validation::require_writable(payer, MetisError::AccountNotWritable)?;
     validation::require_writable(config, MetisError::AccountNotWritable)?;
 
-    // No Config account exists yet to read root from
+    // No Config account exists yet to read root from, so it comes from the hardcoded keys.
     let root = RootAuthority::new(&ROOT_SIGNERS, GUARDIAN, CONFIG_DISCRIMINATOR);
-    if !root.is_root(*authority.address()) {
-        return Err(MetisError::AuthorityMustSign.into());
-    }
+    validation::require_two_root_signers(&root, payer, second_root)?;
 
     if system_program.address() != &pinocchio_system::ID {
         return Err(ProgramError::IncorrectProgramId);
     }
 
-    // Each bps field has its own real ceiling
-    if args.fee_bps > MAX_FEE_PRIMARY_BPS
-        || args.max_in_bps_of_vault > MAX_PRICE_IMPACT_BPS
-        || args.virtual_liquidity_multiple > MAX_VIRTUAL_LIQUIDITY_MULTIPLE
-    {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
-    // The seed fee floor every impact/solvency figure in docs/research.md
-    // is analysed against — config may raise it, never lower it.
-    if args.market_init_fee < MIN_SEED {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
-    // A config ceiling above what Market's account layout can hold would be
-    // a live setting that can never actually be reached.
-    if args.max_outcomes as usize > MAX_OUTCOMES {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
-    // A zeroed quote mint would make every future initialize_market fail,
-    // since markets must match Config.quote_mint and no real mint is zero.
-    if args.quote_mint == Address::default() {
-        return Err(ProgramError::InvalidInstructionData);
+    args.dials.validate()?;
+    // A zeroed address would make every market fail (no real mint is zero) or burn the
+    // protocol's fees into an account nobody controls.
+    if args.quote_mint == Address::default() || args.treasury == Address::default() {
+        return Err(MetisError::ConfigValueOutOfBounds.into());
     }
 
     let config_seeds: [&[u8]; 2] = [CONFIG_SEED, GUARDIAN.as_ref()];
-
     let (config_pda, config_bump) = Address::derive_program_address(&config_seeds, &crate::ID)
         .ok_or(ProgramError::InvalidSeeds)?;
-
     validation::require_addresses_match(config.address(), &config_pda, MetisError::InvalidPda)?;
 
     let rent = Rent::get()?;
@@ -105,7 +83,7 @@ pub fn process_initialize_config(accounts: &mut [AccountView], data: &[u8]) -> P
         Seed::from(bump_seed.as_ref()),
     ];
     CreateAccount {
-        from: authority,
+        from: payer,
         to: config,
         lamports: rent.try_minimum_balance(core::mem::size_of::<Config>())?,
         space: core::mem::size_of::<Config>() as u64,
@@ -114,15 +92,14 @@ pub fn process_initialize_config(accounts: &mut [AccountView], data: &[u8]) -> P
     .invoke_signed(&[Signer::from(&signer_seeds)])?;
 
     let config_state = Config {
-        market_init_fee: args.market_init_fee,
-        fee_bps: args.fee_bps,
-        max_in_bps_of_vault: args.max_in_bps_of_vault,
-        virtual_liquidity_multiple: args.virtual_liquidity_multiple,
+        dials: args.dials,
         root,
         quote_mint: args.quote_mint,
+        treasury: args.treasury,
+        dbc_config: Address::default(),
         discriminator: CONFIG_DISCRIMINATOR,
-        max_outcomes: args.max_outcomes,
         bump: config_bump,
+        _padding: [0; 5],
     };
     config
         .try_borrow_mut()?

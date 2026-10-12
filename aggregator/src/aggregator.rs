@@ -127,6 +127,26 @@ impl Aggregator {
         true
     }
 
+    /// A refresh that, if it leaves nothing to serve, is tried again soon instead of after a whole
+    /// refresh interval.
+    ///
+    /// The boot refresh runs on whatever network the machine has at that moment. If it is down for a
+    /// minute every venue fails, nothing is held (and no database to warm-start from), and the next
+    /// scheduled pass is a quarter of an hour away - an empty catalog and a 503 `/ready` for that
+    /// whole time. Retrying every `retry_after`, up to `max_retries` times, bridges that gap. Once
+    /// anything is held it stops: a partial catalog is the regular schedule's to complete.
+    pub async fn refresh_until_held(&self, retry_after: Duration, max_retries: u32) {
+        self.refresh().await;
+        for attempt in 1..=max_retries {
+            if self.markets.read().await.len() > 0 {
+                return;
+            }
+            tracing::warn!("no markets held after the refresh - trying again in {retry_after:?} (retry {attempt}/{max_retries})");
+            tokio::time::sleep(retry_after).await;
+            self.refresh().await;
+        }
+    }
+
     /// Refreshes one venue: every category its filter accepts, plus one unfiltered sweep.
     ///
     /// The sweep is how categories the venue doesn't advertise are found - Panta's own
@@ -143,8 +163,13 @@ impl Aggregator {
 
         if self.health.breaker_open(venue_id, now_unix(), settings.breaker_cooldown) {
             let kept = self.markets.write().await.mark_venue_stale(venue_id);
-            tracing::warn!("{venue_id}: circuit open after repeated failures - skipping this pass, keeping {kept} markets");
-            return;
+            // The breaker spares a venue that keeps timing out and keeps its last good catalog. With
+            // nothing held there is nothing to keep, and skipping would only leave the venue empty
+            // for the whole cooldown - as after a boot on a bad network - so it is tried anyway.
+            if kept > 0 {
+                tracing::warn!("{venue_id}: circuit open after repeated failures - skipping this pass, keeping {kept} markets");
+                return;
+            }
         }
 
         let mut chains: Vec<Option<String>> = vec![None];
@@ -624,5 +649,33 @@ mod tests {
         venue.fail_pages(&[2]);
         aggregator.refresh().await;
         assert_eq!(held_ids(&aggregator), before);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_empty_catalog_after_the_boot_refresh_is_retried_soon() {
+        let venue = Arc::new(ScriptedVenue::new(true, 5));
+        let aggregator = Aggregator::new(vec![venue.registered()], CategoryAliases::defaults(), None);
+        venue.fail_pages(&[0]);
+        aggregator.refresh().await;
+        let one_pass = *venue.list_calls.lock().unwrap();
+        assert_eq!(aggregator.markets.read().await.len(), 0);
+
+        aggregator.refresh_until_held(Duration::from_secs(60), 2).await;
+        let total = *venue.list_calls.lock().unwrap();
+        // The setup pass, then refresh_until_held's own pass and its two retries - the breaker, which
+        // opened after the first failures, does not stop a venue that holds nothing.
+        assert_eq!(total, one_pass * 4, "the pass ran again twice more while nothing was held");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_catalog_that_is_held_is_not_retried() {
+        let venue = Arc::new(ScriptedVenue::new(true, 5));
+        let aggregator = Aggregator::new(vec![venue.registered()], CategoryAliases::defaults(), None);
+        aggregator.refresh_until_held(Duration::from_secs(60), 5).await;
+        let held = held_ids(&aggregator).len();
+        let calls = *venue.list_calls.lock().unwrap();
+        assert_eq!(held, 15);
+        aggregator.refresh().await;
+        assert_eq!(*venue.list_calls.lock().unwrap(), calls * 2, "refresh_until_held ran exactly one pass");
     }
 }

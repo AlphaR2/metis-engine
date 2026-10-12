@@ -20,19 +20,28 @@ use solana_sdk::{
 use std::str::FromStr;
 
 use metis_core::{
-    amm::instructions::{initialize_market::InitializeMarketArgs, place_bet::PlaceBetArgs},
-    config::instructions::{
-        initialize_config::InitializeConfigArgs, update_config::UpdateConfigArgs,
+    amm::instructions::{
+        initialize_market::InitializeMarketArgs, place_bet::PlaceBetArgs,
+        set_metadata::SetMetadataArgs,
+    },
+    amm::metadata::{CATEGORY_MAX, LABEL_MAX, LEAGUE_MAX, QUESTION_MAX, RUBRIC_MAX},
+    config::{
+        instructions::{
+            initialize_config::InitializeConfigArgs,
+            update_config_critical::UpdateConfigCriticalArgs,
+        },
+        state::ConfigDials,
     },
     constants::{
-        CONFIG_SEED, MARKET_SEED, MAX_OUTCOMES, MIN_SEED, ORACLE_FOOTBALL_DISCRIMINATOR,
-        ORACLE_PROGRAM_ID, OUTCOME_MINT_SEED, PRIMARY_WINDOW_SECS, QUOTE_DECIMALS, ROOT_SIGNERS,
-        VAULT_SEED, VIRTUAL_LIQUIDITY_MULTIPLE,
+        BOOK_SEED, CONFIG_SEED, MANIFEST_PROGRAM_ID, MARKET_SEED, MAX_OUTCOMES,
+        MAX_PRICE_IMPACT_BPS, METADATA_SEED, MIN_DISPUTE_SECS, MIN_SEED, OUTCOME_MINT_SEED,
+        PRIMARY_WINDOW_SECS, QUOTE_DECIMALS, ROOT_SIGNERS, VAULT_SEED, VIRTUAL_LIQUIDITY_MULTIPLE,
     },
-    settlement::instructions::settle_market::SettleMarketArgs,
+    settlement::instructions::sweep_fees::SweepFeesArgs,
 };
+use oracle::instructions::football::{CFootballMatchPhase, FootballSettled};
 
-pub const PROGRAM_ID_STR: &str = "2jt26iYKHghHDFVWQ8rnCdQc5B144Cos6HyJVw68qiv6";
+pub const PROGRAM_ID_STR: &str = "79uea7X34YHRUQFkLAR5rwupHQf6Z7ASbBGfzxRDu8ws";
 
 // The three programs our instructions CPI into. All of them already exist and
 // are executable in a fresh LiteSVM, so nothing needs loading by hand.
@@ -216,48 +225,60 @@ pub fn funded_bettor(svm: &mut LiteSVM, usdc: u64) -> (Keypair, Pubkey) {
     (kp, quote_ata)
 }
 
-// Every market instruction reads Config, so it has to exist first. Creates the
-// singleton with limits switched off (0 = uncapped), which is what most tests
-// want — the ones testing the limits set their own via update_config.
+// Every market instruction reads Config, so it has to exist first. Creates the singleton with
+// default_dials(): no fee or rake yet (those tests set their own), the trade cap at its
+// hardcoded ceiling.
 pub fn setup_with_config(svm: &mut LiteSVM) -> Pubkey {
-    setup_with_config_limits(svm, 0)
+    setup_with_config_limits(svm, MAX_PRICE_IMPACT_BPS)
 }
 
 pub fn setup_with_config_limits(svm: &mut LiteSVM, max_in_bps_of_vault: u16) -> Pubkey {
     setup_with_config_fee(svm, MIN_SEED, max_in_bps_of_vault)
 }
 
-// For tests that need a market_init_fee other than the standard
-// MIN_SEED - e.g. a deliberately tiny fee to reach the discrete/toy
-// regime where isqrt's floor-rounding actually produces a delta of 0. At
-// real MIN_SEED scale that's unreachable: since price = q/C(q) <= 1
-// always, the true share-delta for any payment P is always >= P in the
-// continuous limit, and real pools are deep enough that the continuous
-// approximation is exact - so payment=1 floors to 1, never 0. Only a
-// genuinely small pool (a handful of raw units, not millions) is close
-// enough to the curve's discreteness for that to happen.
+// Valid dials at their gentlest setting. Tests that care about one dial change just that field.
+pub fn default_dials() -> ConfigDials {
+    ConfigDials {
+        market_init_fee: MIN_SEED,
+        virtual_liquidity_multiple: VIRTUAL_LIQUIDITY_MULTIPLE,
+        dispute_secs: MIN_DISPUTE_SECS,
+        fee_bps: 0,
+        rake_bps: 0,
+        max_in_bps_of_vault: MAX_PRICE_IMPACT_BPS,
+        fee_share_protocol_bps: 4_000,
+        fee_share_backers_bps: 3_000,
+        fee_share_creator_bps: 2_000,
+        fee_share_platform_bps: 1_000,
+        max_outcomes: MAX_OUTCOMES as u8,
+        dbc_backing_enabled: 0,
+        _padding: [0; 4],
+    }
+}
+
+// Stand-in protocol treasury. Any non-zero address passes Config validation.
+pub fn treasury() -> Pubkey {
+    Pubkey::new_from_array([7; 32])
+}
+
 pub fn setup_with_config_fee(
     svm: &mut LiteSVM,
     market_init_fee: u64,
     max_in_bps_of_vault: u16,
 ) -> Pubkey {
-    let authority = root_signer(0);
-    svm.airdrop(&authority, 10 * solana_sdk::native_token::LAMPORTS_PER_SOL)
+    let dials = ConfigDials { market_init_fee, max_in_bps_of_vault, ..default_dials() };
+    setup_with_dials(svm, dials)
+}
+
+pub fn setup_with_dials(svm: &mut LiteSVM, dials: ConfigDials) -> Pubkey {
+    let payer = root_signer(0);
+    svm.airdrop(&payer, 10 * solana_sdk::native_token::LAMPORTS_PER_SOL)
         .expect("airdrop bootstrap admin");
 
     let (config, _) = config_pda();
     send_as(
         svm,
-        ix_initialize_config(
-            &authority,
-            &config,
-            market_init_fee,
-            0, // fee_bps — no fee mechanism wired up yet
-            max_in_bps_of_vault,
-            &usdc_mint(),
-            MAX_OUTCOMES as u8,
-        ),
-        authority,
+        ix_initialize_config(&payer, &root_signer(1), &config, dials, &usdc_mint(), &treasury()),
+        payer,
     )
     .expect("setup_with_config: initialize_config should succeed");
 
@@ -355,7 +376,6 @@ pub const FAR_FUTURE_CLOSE: i64 = i64::MAX / 2;
 // the instruction's own account list 1:1 so a mismatch is easy to spot,
 // rather than being hidden inside a builder struct.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn ix_initialize_market(
     creator: &Pubkey,
     creator_quote_ata: &Pubkey,
@@ -363,16 +383,38 @@ pub fn ix_initialize_market(
     vault: &Pubkey,
     nonce: u64,
     num_outcomes: u8,
-    bet_close_ts: i64,
+    condition_kind: u8,
+    condition_param: u8,
     config: &Pubkey,
     oracle: &Pubkey,
-    delegate: &Pubkey,
+) -> Instruction {
+    ix_initialize_market_on_platform(
+        creator, creator_quote_ata, market, vault, nonce, num_outcomes, condition_kind, condition_param, config, oracle, [0u8; 32],
+    )
+}
+
+/// The same, naming the platform the market is created through (all zeroes for none).
+#[allow(clippy::too_many_arguments)]
+pub fn ix_initialize_market_on_platform(
+    creator: &Pubkey,
+    creator_quote_ata: &Pubkey,
+    market: &Pubkey,
+    vault: &Pubkey,
+    nonce: u64,
+    num_outcomes: u8,
+    condition_kind: u8,
+    condition_param: u8,
+    config: &Pubkey,
+    oracle: &Pubkey,
+    platform: [u8; 32],
 ) -> Instruction {
     let args = InitializeMarketArgs {
         nonce,
-        bet_close_ts,
         num_outcomes,
-        _padding: [0u8; 7],
+        condition_kind,
+        condition_param,
+        _padding: [0u8; 5],
+        platform,
     };
     let mut data = metis_core::amm::state::INITIALIZE_MARKET.to_vec();
     data.extend_from_slice(bytes_of(&args));
@@ -390,7 +432,6 @@ pub fn ix_initialize_market(
             AccountMeta::new_readonly(usdc_mint(), false),
             AccountMeta::new_readonly(*config, false),
             AccountMeta::new_readonly(*oracle, false),
-            AccountMeta::new_readonly(*delegate, false),
             AccountMeta::new_readonly(solana_system_interface::program::ID, false),
             AccountMeta::new_readonly(token_program_id(), false),
             AccountMeta::new_readonly(ata_program_id(), false),
@@ -399,7 +440,6 @@ pub fn ix_initialize_market(
             AccountMeta::new(ata(creator, &mint_0), false),
             AccountMeta::new(mint_1, false),
             AccountMeta::new(ata(creator, &mint_1), false),
-            // delegate is root in tests, so the optional DelegatedAuthority account is omitted.
         ],
         data,
     }
@@ -446,29 +486,19 @@ pub fn ix_place_bet(
     }
 }
 
-pub fn ix_settle_market(
-    market: &Pubkey,
-    vault: &Pubkey,
-    authority: &Pubkey,
-    winning_outcome: u8,
-    config: &Pubkey,
-) -> Instruction {
-    let args = SettleMarketArgs {
-        winning_outcome,
-        _padding: [0u8; 7],
-    };
-    let mut data = metis_core::settlement::state::SETTLE_MARKET.to_vec();
-    data.extend_from_slice(bytes_of(&args));
-
+// Anyone can settle: no authority, no winner argument. The oracle decides.
+pub fn ix_settle_market(market: &Pubkey, vault: &Pubkey, oracle: &Pubkey, config: &Pubkey, signer: &Pubkey) -> Instruction {
     Instruction {
         program_id: program_id(),
         accounts: vec![
             AccountMeta::new(*market, false),
             AccountMeta::new_readonly(*vault, false),
-            AccountMeta::new_readonly(*authority, true),
+            AccountMeta::new_readonly(*oracle, false),
             AccountMeta::new_readonly(*config, false),
+            AccountMeta::new_readonly(*signer, true),
+            AccountMeta::new_readonly(delegate_pda(signer), false),
         ],
-        data,
+        data: metis_core::settlement::state::SETTLE_MARKET.to_vec(),
     }
 }
 
@@ -498,24 +528,19 @@ pub fn ix_claim(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // see ix_initialize_market's note above
+// Needs two distinct root signers: `payer` (fee payer, pays rent) and `second_root`.
 pub fn ix_initialize_config(
-    authority: &Pubkey,
+    payer: &Pubkey,
+    second_root: &Pubkey,
     config: &Pubkey,
-    market_init_fee: u64,
-    fee_bps: u16,
-    max_in_bps_of_vault: u16,
+    dials: ConfigDials,
     quote_mint: &Pubkey,
-    max_outcomes: u8,
+    treasury: &Pubkey,
 ) -> Instruction {
     let args = InitializeConfigArgs {
-        market_init_fee,
-        virtual_liquidity_multiple: VIRTUAL_LIQUIDITY_MULTIPLE,
-        fee_bps,
-        max_in_bps_of_vault,
+        dials,
         quote_mint: quote_mint.to_bytes().into(),
-        max_outcomes,
-        _padding: [0u8; 3],
+        treasury: treasury.to_bytes().into(),
     };
     let mut data = metis_core::config::state::INITIALIZE_CONFIG.to_vec();
     data.extend_from_slice(bytes_of(&args));
@@ -523,7 +548,8 @@ pub fn ix_initialize_config(
     Instruction {
         program_id: program_id(),
         accounts: vec![
-            AccountMeta::new(*authority, true),
+            AccountMeta::new(*payer, true),
+            AccountMeta::new_readonly(*second_root, true),
             AccountMeta::new_readonly(solana_system_interface::program::ID, false),
             AccountMeta::new(*config, false),
         ],
@@ -531,27 +557,9 @@ pub fn ix_initialize_config(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // see ix_initialize_market's note above
-pub fn ix_update_config(
-    config: &Pubkey,
-    admin: &Pubkey,
-    market_init_fee: u64,
-    fee_bps: u16,
-    max_in_bps_of_vault: u16,
-    quote_mint: &Pubkey,
-    max_outcomes: u8,
-) -> Instruction {
-    let args = UpdateConfigArgs {
-        market_init_fee,
-        virtual_liquidity_multiple: VIRTUAL_LIQUIDITY_MULTIPLE,
-        fee_bps,
-        max_in_bps_of_vault,
-        quote_mint: quote_mint.to_bytes().into(),
-        max_outcomes,
-        _padding: [0u8; 3],
-    };
+pub fn ix_update_config(config: &Pubkey, admin: &Pubkey, dials: ConfigDials) -> Instruction {
     let mut data = metis_core::config::state::UPDATE_CONFIG.to_vec();
-    data.extend_from_slice(bytes_of(&args));
+    data.extend_from_slice(bytes_of(&dials));
 
     Instruction {
         program_id: program_id(),
@@ -560,6 +568,238 @@ pub fn ix_update_config(
             AccountMeta::new_readonly(*admin, true),
         ],
         data,
+    }
+}
+
+pub fn ix_update_config_critical(
+    config: &Pubkey,
+    first_root: &Pubkey,
+    second_root: &Pubkey,
+    quote_mint: &Pubkey,
+    treasury: &Pubkey,
+    dbc_config: &Pubkey,
+) -> Instruction {
+    let args = UpdateConfigCriticalArgs {
+        quote_mint: quote_mint.to_bytes().into(),
+        treasury: treasury.to_bytes().into(),
+        dbc_config: dbc_config.to_bytes().into(),
+    };
+    let mut data = metis_core::config::state::UPDATE_CONFIG_CRITICAL.to_vec();
+    data.extend_from_slice(bytes_of(&args));
+
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*config, false),
+            AccountMeta::new_readonly(*first_root, true),
+            AccountMeta::new_readonly(*second_root, true),
+        ],
+        data,
+    }
+}
+
+
+pub fn ix_set_metadata(creator: &Pubkey, market: &Pubkey, text: &Text) -> Instruction {
+    let args = text.to_args();
+    let mut data = metis_core::amm::state::SET_METADATA.to_vec();
+    data.extend_from_slice(bytes_of(&args));
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*creator, true),
+            AccountMeta::new_readonly(*market, false),
+            AccountMeta::new(metadata_pda(market).0, false),
+            AccountMeta::new_readonly(solana_system_interface::program::ID, false),
+        ],
+        data,
+    }
+}
+
+/// `which`: 0 = the protocol's share to the treasury, 1 = the seed holder's share to the creator.
+pub fn ix_sweep_fees(market: &Pubkey, vault: &Pubkey, recipient_ata: &Pubkey, config: &Pubkey, which: u8, signer: &Pubkey) -> Instruction {
+    let args = SweepFeesArgs { which, _padding: [0; 7] };
+    let mut data = metis_core::settlement::state::SWEEP_FEES.to_vec();
+    data.extend_from_slice(bytes_of(&args));
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*market, false),
+            AccountMeta::new(*vault, false),
+            AccountMeta::new(*recipient_ata, false),
+            AccountMeta::new_readonly(usdc_mint(), false),
+            AccountMeta::new_readonly(*config, false),
+            AccountMeta::new_readonly(token_program_id(), false),
+            AccountMeta::new_readonly(*signer, true),
+            AccountMeta::new_readonly(delegate_pda(signer), false),
+        ],
+        data,
+    }
+}
+
+/// Roots are only needed (and only signed) when cancelling by root; pass the same placeholder
+/// keys and `signed = false` otherwise.
+pub fn ix_cancel_market(market: &Pubkey, oracle: &Pubkey, config: &Pubkey, signer: &Pubkey, roots: Option<(Pubkey, Pubkey)>) -> Instruction {
+    // Cancelling by root: both roots sign. Otherwise the signer is the first signature and the
+    // second is an unsigned placeholder.
+    let (first, second) = roots.unwrap_or((*signer, Pubkey::new_unique()));
+    let signed = roots.is_some();
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*market, false),
+            AccountMeta::new_readonly(*oracle, false),
+            AccountMeta::new_readonly(*config, false),
+            AccountMeta::new_readonly(first, true),
+            AccountMeta::new_readonly(second, signed),
+            AccountMeta::new_readonly(delegate_pda(&first), false),
+        ],
+        data: metis_core::settlement::state::CANCEL_MARKET.to_vec(),
+    }
+}
+
+pub fn ix_claim_refund(market: &Pubkey, vault: &Pubkey, holder: &Pubkey, holder_quote_ata: &Pubkey, outcome_index: u8) -> Instruction {
+    let (mint, _) = outcome_mint_pda(market, outcome_index);
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new_readonly(*market, false),
+            AccountMeta::new(*vault, false),
+            AccountMeta::new_readonly(*holder, true),
+            AccountMeta::new(*holder_quote_ata, false),
+            AccountMeta::new_readonly(usdc_mint(), false),
+            AccountMeta::new(mint, false),
+            AccountMeta::new(ata(holder, &mint), false),
+            AccountMeta::new_readonly(token_program_id(), false),
+        ],
+        data: metis_core::settlement::state::CLAIM_REFUND.to_vec(),
+    }
+}
+
+pub fn ix_close_market(market: &Pubkey, vault: &Pubkey, treasury_ata: &Pubkey, recipient: &Pubkey, config: &Pubkey) -> Instruction {
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*market, false),
+            AccountMeta::new(*vault, false),
+            AccountMeta::new(*treasury_ata, false),
+            AccountMeta::new_readonly(usdc_mint(), false),
+            AccountMeta::new(metadata_pda(market).0, false),
+            AccountMeta::new(*recipient, true),
+            AccountMeta::new_readonly(*config, false),
+            AccountMeta::new_readonly(token_program_id(), false),
+            AccountMeta::new_readonly(delegate_pda(recipient), false),
+        ],
+        data: metis_core::settlement::state::CLOSE_MARKET.to_vec(),
+    }
+}
+
+pub fn manifest_program_id() -> Pubkey {
+    Pubkey::new_from_array(MANIFEST_PROGRAM_ID.to_bytes())
+}
+
+pub fn token_2022_program_id() -> Pubkey {
+    Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap()
+}
+
+pub fn book_pda(market: &Pubkey, index: u8) -> Pubkey {
+    Pubkey::find_program_address(&[BOOK_SEED, market.as_ref(), &[index]], &program_id()).0
+}
+
+pub fn metadata_pda(market: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[METADATA_SEED, market.as_ref()], &program_id())
+}
+
+/// Manifest's own vault PDA for a book and one of its mints.
+pub fn manifest_vault(book: &Pubkey, mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"vault", book.as_ref(), mint.as_ref()], &manifest_program_id()).0
+}
+
+pub fn ix_close_primary(payer: &Pubkey, market: &Pubkey, config: &Pubkey) -> Instruction {
+    let mints = [outcome_mint_pda(market, 0).0, outcome_mint_pda(market, 1).0];
+    let books = [book_pda(market, 0), book_pda(market, 1)];
+    let q = usdc_mint();
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*market, false),
+            AccountMeta::new(*payer, true),
+            AccountMeta::new_readonly(q, false),
+            AccountMeta::new(mints[0], false),
+            AccountMeta::new(mints[1], false),
+            AccountMeta::new(books[0], false),
+            AccountMeta::new(books[1], false),
+            AccountMeta::new(manifest_vault(&books[0], &mints[0]), false),
+            AccountMeta::new(manifest_vault(&books[0], &q), false),
+            AccountMeta::new(manifest_vault(&books[1], &mints[1]), false),
+            AccountMeta::new(manifest_vault(&books[1], &q), false),
+            AccountMeta::new_readonly(solana_system_interface::program::ID, false),
+            AccountMeta::new_readonly(token_program_id(), false),
+            AccountMeta::new_readonly(token_2022_program_id(), false),
+            AccountMeta::new_readonly(manifest_program_id(), false),
+            AccountMeta::new_readonly(*config, false),
+            AccountMeta::new_readonly(delegate_pda(payer), false),
+        ],
+        data: metis_core::amm::state::CLOSE_PRIMARY.to_vec(),
+    }
+}
+
+pub fn ix_pause(root: &Pubkey, config: &Pubkey) -> Instruction {
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![AccountMeta::new_readonly(*root, true), AccountMeta::new(*config, false)],
+        data: metis_core::config::state::PAUSE.to_vec(),
+    }
+}
+
+pub fn ix_unpause(signers: &[Pubkey], config: &Pubkey) -> Instruction {
+    let mut accounts = vec![AccountMeta::new_readonly(signers[0], true), AccountMeta::new(*config, false)];
+    accounts.extend(signers[1..].iter().map(|k| AccountMeta::new_readonly(*k, true)));
+    Instruction { program_id: program_id(), accounts, data: metis_core::config::state::UNPAUSE.to_vec() }
+}
+
+pub fn guardian_signer() -> Pubkey {
+    Pubkey::new_from_array(metis_core::constants::GUARDIAN.to_bytes())
+}
+
+/// Market text in plain strings; `to_args` packs it the way the instruction wants.
+pub struct Text {
+    pub question: &'static str,
+    pub rubric_yes: &'static str,
+    pub rubric_no: &'static str,
+    pub label_yes: &'static str,
+    pub label_no: &'static str,
+    pub category: &'static str,
+    pub league: &'static str,
+}
+
+impl Text {
+    pub fn sample() -> Self {
+        Text {
+            question: "Will Team A beat Team B?",
+            rubric_yes: "Resolves YES if Team A leads Team B after 90 minutes of play, stoppage time included.",
+            rubric_no: "Resolves NO for a draw or a Team B win after 90 minutes. Extra time and penalties do not count.",
+            label_yes: "Team A wins",
+            label_no: "Draw or Team B",
+            category: "Sports",
+            league: "Example League",
+        }
+    }
+
+    pub fn to_args(&self) -> SetMetadataArgs {
+        fn put<const N: usize>(s: &str) -> ([u8; N], u16) {
+            let mut buf = [0u8; N];
+            let n = s.len().min(N);
+            buf[..n].copy_from_slice(&s.as_bytes()[..n]);
+            (buf, s.len() as u16)
+        }
+        let (question, a) = put::<QUESTION_MAX>(self.question);
+        let (rubric_yes, b) = put::<RUBRIC_MAX>(self.rubric_yes);
+        let (rubric_no, c) = put::<RUBRIC_MAX>(self.rubric_no);
+        let (label_yes, d) = put::<LABEL_MAX>(self.label_yes);
+        let (label_no, e) = put::<LABEL_MAX>(self.label_no);
+        let (category, f) = put::<CATEGORY_MAX>(self.category);
+        let (league, g) = put::<LEAGUE_MAX>(self.league);
+        SetMetadataArgs { question, rubric_yes, rubric_no, label_yes, label_no, category, league, lens: [a, b, c, d, e, f, g] }
     }
 }
 
@@ -603,6 +843,17 @@ pub fn send_as(
     svm.send_transaction(tx).map(|_| ())
 }
 
+#[allow(clippy::result_large_err)] // see send()'s note above
+pub fn send_as_meta(
+    svm: &mut LiteSVM,
+    ix: Instruction,
+    payer: Pubkey,
+) -> Result<litesvm::types::TransactionMetadata, litesvm::types::FailedTransactionMetadata> {
+    let blockhash = svm.latest_blockhash();
+    let message = solana_sdk::message::Message::new_with_blockhash(&[ix], Some(&payer), &blockhash);
+    svm.send_transaction(Transaction::new_unsigned(message))
+}
+
 // Same as send(), but keeps the transaction metadata instead of throwing it
 // away - this is where compute_units_consumed and the real lamport fee live.
 // Split out as its own function rather than changing send()'s return type,
@@ -623,8 +874,8 @@ pub fn send_with_meta(
     svm.send_transaction(tx)
 }
 
-// One-call market setup used by most tests: a creator with USDC, a market
-// opened with the given kickoff time, and everything needed to bet on it.
+// One-call market setup used by most tests: a creator with USDC, a market on a freshly created
+// oracle, and everything needed to bet on it.
 pub struct TestMarket {
     pub creator: Keypair,
     pub creator_quote_ata: Pubkey,
@@ -632,56 +883,98 @@ pub struct TestMarket {
     pub vault: Pubkey,
     pub config: Pubkey,
     pub oracle: Pubkey,
-    pub delegate: Pubkey,
+    /// Kickoff, which is also the market's `bet_close_ts` (it comes from the oracle).
     pub bet_close_ts: i64,
 }
 
-pub fn open_market(svm: &mut LiteSVM, nonce: u64, bet_close_ts: i64) -> TestMarket {
+pub fn open_market(svm: &mut LiteSVM, nonce: u64, kickoff: i64) -> TestMarket {
     let config = setup_with_config(svm);
-    open_market_with_config(svm, nonce, bet_close_ts, config)
+    open_market_with_config(svm, nonce, kickoff, config)
 }
 
-// Same, but works out the kickoff time itself. Saves callers from writing
-// `default_close_ts(&svm)` inside a call that already borrows svm mutably,
-// which the borrow checker won't allow.
+// Same, but works out the kickoff itself. Saves callers from writing `default_close_ts(&svm)`
+// inside a call that already borrows svm mutably, which the borrow checker won't allow.
 pub fn open_market_default(svm: &mut LiteSVM, nonce: u64) -> TestMarket {
-    let bet_close_ts = default_close_ts(svm);
-    open_market(svm, nonce, bet_close_ts)
+    let kickoff = default_close_ts(svm);
+    open_market(svm, nonce, kickoff)
 }
 
-// A minimal fake oracle account for tests that only need initialize_market's ownership +
-// discriminator check to pass - not a real FootballSettled, since nothing reads its actual
-// score/status data yet (that wiring is deliberately deferred). Owner + the last 8 bytes
-// (discriminator) is all initialize_market currently checks.
-pub fn fake_oracle_account(svm: &mut LiteSVM) -> Pubkey {
-    let oracle = Pubkey::new_unique();
-    let mut data = vec![0u8; 64];
-    let len = data.len();
-    data[len - 8..].copy_from_slice(&ORACLE_FOOTBALL_DISCRIMINATOR);
+// ── The oracle, as the program really reads it
+//
+// Core tests don't load the oracle program: they write the oracle's account bytes directly, in
+// the real layout, owned by the real oracle program id. That is exactly what core reads.
+
+pub fn oracle_program_id() -> Pubkey {
+    Pubkey::new_from_array(oracle::ID.to_bytes())
+}
+
+/// A fresh, scheduled fixture with the given kickoff.
+pub fn oracle_account(svm: &mut LiteSVM, kickoff: i64) -> Pubkey {
+    let address = Pubkey::new_unique();
+    let now = current_clock_ts(svm);
+    let state = FootballSettled::new(address.to_bytes(), kickoff, now);
     svm.set_account(
-        oracle,
+        address,
         Account {
             lamports: 1_000_000,
-            data,
-            owner: Pubkey::new_from_array(ORACLE_PROGRAM_ID.to_bytes()),
+            data: state.as_bytes().to_vec(),
+            owner: oracle_program_id(),
             ..Default::default()
         },
     )
-    .expect("fake oracle account is seeded");
-    oracle
+    .expect("oracle account is seeded");
+    address
 }
 
-pub fn open_market_with_config(
+pub fn edit_oracle(svm: &mut LiteSVM, oracle: &Pubkey, edit: impl FnOnce(&mut FootballSettled)) {
+    let mut account = svm.get_account(oracle).expect("oracle exists");
+    let mut state = *bytemuck::checked::try_from_bytes::<FootballSettled>(&account.data).unwrap();
+    edit(&mut state);
+    account.data = state.as_bytes().to_vec();
+    svm.set_account(*oracle, account).unwrap();
+}
+
+/// Makes the oracle's result final: a finished match with this 90-minute score, final at `at`.
+pub fn finalize_oracle(svm: &mut LiteSVM, oracle: &Pubkey, home: u8, away: u8, at: i64) {
+    edit_oracle(svm, oracle, |s| {
+        let score = FootballSettled::pack_score(home, away);
+        s.status = CFootballMatchPhase::Finished;
+        s.score = score;
+        s.regulation_score = score;
+        s.finalized = 1;
+        s.finished_at = at.to_le_bytes();
+    });
+}
+
+pub fn void_oracle(svm: &mut LiteSVM, oracle: &Pubkey, at: i64) {
+    edit_oracle(svm, oracle, |s| {
+        s.voided = 1;
+        s.finished_at = at.to_le_bytes();
+    });
+}
+
+pub fn set_clock(svm: &mut LiteSVM, ts: i64) {
+    let mut clock = svm.get_sysvar::<solana_sdk::clock::Clock>();
+    clock.unix_timestamp = ts;
+    svm.set_sysvar(&clock);
+}
+
+pub fn open_market_with_config(svm: &mut LiteSVM, nonce: u64, kickoff: i64, config: Pubkey) -> TestMarket {
+    open_market_with_condition(svm, nonce, kickoff, config, metis_core::amm::condition::HOME_WIN, 0)
+}
+
+pub fn open_market_with_condition(
     svm: &mut LiteSVM,
     nonce: u64,
-    bet_close_ts: i64,
+    kickoff: i64,
     config: Pubkey,
+    condition_kind: u8,
+    condition_param: u8,
 ) -> TestMarket {
     let (creator, creator_quote_ata) = funded_bettor(svm, 100 * MIN_SEED);
     let (market, _) = market_pda(&creator.pubkey(), nonce);
     let (vault, _) = vault_pda(&market);
-    let oracle = fake_oracle_account(svm);
-    let delegate = root_signer(0);
+    let oracle = oracle_account(svm, kickoff);
 
     send(
         svm,
@@ -692,24 +985,317 @@ pub fn open_market_with_config(
             &vault,
             nonce,
             2,
-            bet_close_ts,
+            condition_kind,
+            condition_param,
             &config,
             &oracle,
-            &delegate,
         ),
         &creator,
         &[],
     )
     .expect("open_market: initialize_market should succeed");
 
-    TestMarket {
-        creator,
-        creator_quote_ata,
-        market,
-        vault,
-        config,
-        oracle,
-        delegate,
-        bet_close_ts,
+    TestMarket { creator, creator_quote_ata, market, vault, config, oracle, bet_close_ts: kickoff }
+}
+
+/// A football market created through `platform`, which earns the platform's share of its revenue.
+pub fn open_market_on_platform(svm: &mut LiteSVM, nonce: u64, kickoff: i64, config: Pubkey, platform: &Pubkey) -> TestMarket {
+    let (creator, creator_quote_ata) = funded_bettor(svm, 100 * MIN_SEED);
+    let (market, _) = market_pda(&creator.pubkey(), nonce);
+    let (vault, _) = vault_pda(&market);
+    let oracle = oracle_account(svm, kickoff);
+    send(
+        svm,
+        ix_initialize_market_on_platform(
+            &creator.pubkey(), &creator_quote_ata, &market, &vault, nonce, 2,
+            metis_core::amm::condition::HOME_WIN, 0, &config, &oracle, platform.to_bytes(),
+        ),
+        &creator,
+        &[],
+    )
+    .expect("open_market_on_platform: initialize_market should succeed");
+    TestMarket { creator, creator_quote_ata, market, vault, config, oracle, bet_close_ts: kickoff }
+}
+
+/// Loads the real Manifest program, if it has been fetched (`just fetch-manifest`). Tests that
+/// need it skip, loudly, when it isn't there rather than failing for an unrelated reason.
+pub fn load_manifest(svm: &mut LiteSVM) -> bool {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/deploy/manifest.so");
+    match svm.add_program_from_file(manifest_program_id(), &path) {
+        Ok(()) => true,
+        Err(_) => {
+            eprintln!("SKIPPED: {path:?} not found - run `just fetch-manifest` to enable the Manifest tests");
+            false
+        }
+    }
+}
+
+// ── Assertions and reads ─────────────────────────────────────────────────
+
+/// Asserts a transaction failed with exactly this program error - not merely "failed", so a test
+/// can't pass because of an unrelated mistake in how it was built.
+#[track_caller]
+pub fn assert_fails_with(result: Result<(), litesvm::types::FailedTransactionMetadata>, expected: metis_core::error::MetisError) {
+    use solana_sdk::{instruction::InstructionError, transaction::TransactionError};
+    match result {
+        Ok(()) => panic!("expected {expected:?} but the transaction succeeded"),
+        Err(f) => match f.err {
+            TransactionError::InstructionError(_, InstructionError::Custom(code)) => {
+                assert_eq!(code, expected as u32, "expected {expected:?} ({}), got custom error {code}", expected as u32)
+            }
+            other => panic!("expected {expected:?} but got {other:?}\nlogs: {:#?}", f.meta.logs),
+        },
+    }
+}
+
+pub fn read_market(svm: &LiteSVM, market: &Pubkey) -> metis_core::amm::state::Market {
+    let data = svm.get_account(market).expect("market exists").data;
+    *bytemuck::from_bytes::<metis_core::amm::state::Market>(&data)
+}
+
+pub fn market_exists(svm: &LiteSVM, market: &Pubkey) -> bool {
+    svm.get_account(market).is_some_and(|a| !a.data.is_empty())
+}
+
+/// Places a bet and returns the shares received. Panics if the bet fails.
+pub fn bet(svm: &mut LiteSVM, m: &TestMarket, who: &Keypair, who_quote_ata: &Pubkey, side: u8, amount: u64) -> u64 {
+    let before = token_balance(svm, &outcome_ata(&m.market, &who.pubkey(), side));
+    send(svm, ix_place_bet(&m.market, &m.vault, &who.pubkey(), who_quote_ata, side, amount, 0, &m.config), who, &[])
+        .expect("bet should succeed");
+    token_balance(svm, &outcome_ata(&m.market, &who.pubkey(), side)) - before
+}
+
+/// Everything a settled-market test needs: the config with a chosen set of dials, a market with a
+/// chosen condition, and bettors on both sides.
+pub fn treasury_ata(svm: &mut LiteSVM) -> Pubkey {
+    // The treasury's USDC account; created empty.
+    let account = ata(&treasury(), &usdc_mint());
+    svm.set_account(
+        account,
+        Account {
+            lamports: svm.minimum_balance_for_rent_exemption(165),
+            data: pack_token_account(&usdc_mint(), &treasury(), 0),
+            owner: token_program_id(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    account
+}
+
+// ── Operators ────────────────────────────────────────────────────────────
+
+pub fn delegate_pda(who: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[metis_core::constants::DELEGATED_AUTHORITY_SEED, who.as_ref()], &program_id()).0
+}
+
+/// Writes a completed attestation of `who`, as two roots attesting would leave it.
+pub fn attest_operator(svm: &mut LiteSVM, who: &Pubkey) {
+    let mut a = metis_authority::delegated::DelegatedAuthority::new(
+        pinocchio::Address::from(who.to_bytes()),
+        metis_core::config::state::DELEGATED_AUTHORITY_DISCRIMINATOR,
+    );
+    a.attesters = [root_signer(0).to_bytes(), root_signer(1).to_bytes()];
+    a.is_attest_complete = 1u64.to_le_bytes();
+    svm.set_account(
+        delegate_pda(who),
+        solana_sdk::account::Account {
+            lamports: 1_000_000_000,
+            data: bytemuck::bytes_of(&a).to_vec(),
+            owner: program_id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .expect("write attestation");
+}
+
+/// Removes an attestation, as `remove_authority` would.
+pub fn revoke_operator(svm: &mut LiteSVM, who: &Pubkey) {
+    svm.set_account(delegate_pda(who), solana_sdk::account::Account::default()).expect("clear attestation");
+}
+
+/// A keypair with SOL that is an attested operator.
+pub fn funded_operator(svm: &mut LiteSVM, lamports: u64) -> Keypair {
+    let kp = funded_keypair(svm, lamports);
+    attest_operator(svm, &kp.pubkey());
+    kp
+}
+
+pub fn ix_forfeit_creator_fees(
+    market: &Pubkey,
+    vault: &Pubkey,
+    treasury_ata: &Pubkey,
+    config: &Pubkey,
+    first: &Pubkey,
+    second: &Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*market, false),
+            AccountMeta::new(*vault, false),
+            AccountMeta::new(*treasury_ata, false),
+            AccountMeta::new_readonly(usdc_mint(), false),
+            AccountMeta::new_readonly(*config, false),
+            AccountMeta::new_readonly(*first, true),
+            AccountMeta::new_readonly(*second, true),
+            AccountMeta::new_readonly(token_program_id(), false),
+        ],
+        data: metis_core::settlement::state::FORFEIT_CREATOR_FEES.to_vec(),
+    }
+}
+
+// ── DBC-backed markets ───────────────────────────────────────────────────
+
+/// Writes an SPL mint with no mint or freeze authority and the given supply, standing in for what
+/// a Meteora DBC base mint looks like once its pool has been created with an immutable authority
+/// option (verified against a real DBC pool on a local validator).
+pub fn set_final_mint(svm: &mut LiteSVM, mint: &Pubkey, supply: u64) {
+    svm.set_account(
+        *mint,
+        Account { lamports: 1_000_000_000, data: pack_mint(None, supply, QUOTE_DECIMALS), owner: token_program_id(), executable: false, rent_epoch: 0 },
+    )
+    .expect("write backer mint");
+}
+
+/// Writes a mint that STILL has a mint authority (an unfinished raise).
+pub fn set_mint_with_authority(svm: &mut LiteSVM, mint: &Pubkey, authority: &Pubkey, supply: u64) {
+    svm.set_account(
+        *mint,
+        Account { lamports: 1_000_000_000, data: pack_mint(Some(authority), supply, QUOTE_DECIMALS), owner: token_program_id(), executable: false, rent_epoch: 0 },
+    )
+    .expect("write backer mint");
+}
+
+/// Gives `owner` `amount` of `mint` in their associated account.
+pub fn set_token_balance(svm: &mut LiteSVM, mint: &Pubkey, owner: &Pubkey, amount: u64) -> Pubkey {
+    let account = ata(owner, mint);
+    svm.set_account(
+        account,
+        Account {
+            lamports: svm.minimum_balance_for_rent_exemption(TOKEN_ACCOUNT_LEN),
+            data: pack_token_account(mint, owner, amount),
+            owner: token_program_id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .expect("write token account");
+    account
+}
+
+/// Sets the amount held by an existing token account (the vault, as the raise would fund it).
+pub fn set_vault_amount(svm: &mut LiteSVM, vault: &Pubkey, amount: u64) {
+    let mut a = svm.get_account(vault).expect("vault exists");
+    a.data[64..72].copy_from_slice(&amount.to_le_bytes());
+    svm.set_account(*vault, a).expect("write vault");
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn ix_initialize_backed_market(
+    creator: &Pubkey,
+    market: &Pubkey,
+    vault: &Pubkey,
+    nonce: u64,
+    condition_kind: u8,
+    condition_param: u8,
+    config: &Pubkey,
+    oracle: &Pubkey,
+    platform: [u8; 32],
+    backer_mint: &Pubkey,
+    seed_target: u64,
+    raise_deadline: i64,
+) -> Instruction {
+    let args = metis_core::amm::instructions::initialize_market::InitializeBackedMarketArgs {
+        nonce,
+        num_outcomes: 2,
+        condition_kind,
+        condition_param,
+        _padding: [0u8; 5],
+        platform,
+        backer_mint: backer_mint.to_bytes(),
+        seed_target,
+        raise_deadline,
+    };
+    let mut data = metis_core::amm::state::INITIALIZE_BACKED_MARKET.to_vec();
+    data.extend_from_slice(bytes_of(&args));
+    let (mint_0, _) = outcome_mint_pda(market, 0);
+    let (mint_1, _) = outcome_mint_pda(market, 1);
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*market, false),
+            AccountMeta::new(*vault, false),
+            AccountMeta::new(*creator, true),
+            AccountMeta::new_readonly(usdc_mint(), false),
+            AccountMeta::new_readonly(*config, false),
+            AccountMeta::new_readonly(*oracle, false),
+            AccountMeta::new_readonly(solana_system_interface::program::ID, false),
+            AccountMeta::new_readonly(token_program_id(), false),
+            AccountMeta::new(mint_0, false),
+            AccountMeta::new(mint_1, false),
+        ],
+        data,
+    }
+}
+
+pub fn ix_activate_market(market: &Pubkey, vault: &Pubkey, operator: &Pubkey, config: &Pubkey, backer_mint: &Pubkey) -> Instruction {
+    let (mint_0, _) = outcome_mint_pda(market, 0);
+    let (mint_1, _) = outcome_mint_pda(market, 1);
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*market, false),
+            AccountMeta::new_readonly(*vault, false),
+            AccountMeta::new(*operator, true),
+            AccountMeta::new_readonly(*config, false),
+            AccountMeta::new_readonly(*backer_mint, false),
+            AccountMeta::new(mint_0, false),
+            AccountMeta::new(mint_1, false),
+            AccountMeta::new(ata(market, &mint_0), false),
+            AccountMeta::new(ata(market, &mint_1), false),
+            AccountMeta::new_readonly(solana_system_interface::program::ID, false),
+            AccountMeta::new_readonly(token_program_id(), false),
+            AccountMeta::new_readonly(ata_program_id(), false),
+            AccountMeta::new_readonly(delegate_pda(operator), false),
+        ],
+        data: metis_core::amm::state::ACTIVATE_MARKET.to_vec(),
+    }
+}
+
+pub fn ix_claim_backer(market: &Pubkey, vault: &Pubkey, backer: &Pubkey, backer_quote_ata: &Pubkey, backer_mint: &Pubkey) -> Instruction {
+    let (mint_0, _) = outcome_mint_pda(market, 0);
+    let (mint_1, _) = outcome_mint_pda(market, 1);
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*market, false),
+            AccountMeta::new(*vault, false),
+            AccountMeta::new_readonly(*backer, true),
+            AccountMeta::new(*backer_quote_ata, false),
+            AccountMeta::new_readonly(usdc_mint(), false),
+            AccountMeta::new(*backer_mint, false),
+            AccountMeta::new(ata(backer, backer_mint), false),
+            AccountMeta::new(mint_0, false),
+            AccountMeta::new(mint_1, false),
+            AccountMeta::new(ata(market, &mint_0), false),
+            AccountMeta::new(ata(market, &mint_1), false),
+            AccountMeta::new_readonly(token_program_id(), false),
+        ],
+        data: metis_core::settlement::state::CLAIM_BACKER.to_vec(),
+    }
+}
+
+pub fn ix_cancel_pending_market(market: &Pubkey, config: &Pubkey, signer: &Pubkey) -> Instruction {
+    Instruction {
+        program_id: program_id(),
+        accounts: vec![
+            AccountMeta::new(*market, false),
+            AccountMeta::new_readonly(*config, false),
+            AccountMeta::new_readonly(*signer, true),
+            AccountMeta::new_readonly(delegate_pda(signer), false),
+        ],
+        data: metis_core::settlement::state::CANCEL_PENDING_MARKET.to_vec(),
     }
 }

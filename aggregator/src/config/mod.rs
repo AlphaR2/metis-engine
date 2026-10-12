@@ -61,7 +61,7 @@ pub struct Config {
     /// origin: the API holds no cookies or credentials, so there is nothing for another site to ride.
     pub cors_origin: Option<String>,
     /// The venues to wire up, in `ENABLED_VENUES` order (comma-separated ids, default
-    /// `panta,jupiter`). Each reads its own `<ID>_*` settings; see `VenueConfig`.
+    /// `panta,metis`). Each reads its own `<ID>_*` settings; see `VenueConfig`.
     pub venues: Vec<VenueConfig>,
     /// Extra category aliases, `from=to,from=to`, on top of `CategoryAliases::defaults()`.
     pub category_aliases: String,
@@ -84,7 +84,7 @@ pub struct Config {
 
 /// The venues wired up when `ENABLED_VENUES` is unset.
 fn default_enabled_venues() -> Vec<String> {
-    vec!["panta".to_string(), "jupiter".to_string()]
+    vec!["panta".to_string(), "metis".to_string()]
 }
 
 impl Config {

@@ -7,6 +7,16 @@ edition = "2024"
 name = "metis_core"
 crate-type = ["cdylib", "lib"]
 
+[features]
+no-entrypoint = []
+# Network trust roots, forwarded to metis-authority (see authority/src/network.rs).
+devnet = ["metis-authority/devnet"]
+mainnet = ["metis-authority/mainnet"]
+# Demo timers (windows of seconds/minutes instead of hours/days). Independent of the trust roots, so a
+# devnet demo can use its own real roots with short timers. NEVER with `mainnet` (compile_error).
+short-timers = []
+localnet = ["metis-authority/localnet", "short-timers"]
+
 [dependencies]
 bytemuck = { workspace = true }
 pinocchio = { workspace = true }
@@ -15,6 +25,10 @@ pinocchio-system = { workspace = true }
 pinocchio-token = { workspace = true }
 solana-address = { workspace = true }
 metis-authority = { workspace = true }
+# Core reads the oracle's account through its real types and uses its real program id,
+# instead of keeping hand-copied constants that could drift. no-entrypoint: only one
+# entrypoint may exist in a program binary, and it is core's.
+metis-oracle = { path = "../oracle", features = ["no-entrypoint"] }
 
 [dev-dependencies]
 litesvm = { workspace = true }

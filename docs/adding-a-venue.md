@@ -73,6 +73,15 @@ ENABLED_VENUES=panta,jupiter,<id>
 
 Adapter-specific options use the same prefix (Panta reads `PANTA_QUOTE_WALLET`).
 
+A venue that is read from chain rather than an HTTP API (`metis`) needs no key and has its own
+options (`METIS_RPC_URL`, `METIS_PROGRAM_ID`, ...). It is a different shape of adapter - a
+JSON-RPC `chain.rs`, a pure `view.rs` that turns accounts into `VenueMarket`s, `orders.rs` for
+the buy, sell and claim transactions (a maker's Manifest seat balances are withdrawn inside the claim),
+`secondary.rs` for the order books, and `create.rs` for market creation (two transactions: the market,
+then its text, selected by `venue_params.step`) - and is documented in `aggregator/README.md`. Its contract checks live in its own
+tests (`services/metis/tests.rs`) against a mock RPC node, because there are no HTTP fixtures to
+replay.
+
 If the venue's category names differ in wording from existing ones, add aliases with
 `CATEGORY_ALIASES=from=to,...`. Categories without an alias are still served under their own
 name.

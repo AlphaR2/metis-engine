@@ -80,6 +80,37 @@ pub fn require_addresses_match(
     Ok(())
 }
 
+/// The one Config account: rebuilt from its seeds rather than trusted, then checked to exist
+/// and belong to this program. The caller still checks the discriminator after borrowing.
+pub fn require_config_account(config: &AccountView, must_be_writable: bool) -> Result<(), ProgramError> {
+    let (config_pda, _) = Address::derive_program_address(
+        &[crate::constants::CONFIG_SEED, crate::constants::GUARDIAN.as_ref()],
+        &crate::ID,
+    )
+    .ok_or(MetisError::InvalidPda)?;
+    require_addresses_match(config.address(), &config_pda, MetisError::InvalidPda)?;
+    require_initialized_and_owned(config, &crate::ID, must_be_writable, MetisError::InvalidConfigAccount)
+}
+
+/// For the high-friction actions (critical config fields, overrides, cancels): both accounts
+/// must sign, both must be current root signers, and they must be two different keys - one
+/// compromised key passed twice doesn't count.
+pub fn require_two_root_signers(
+    root: &metis_authority::root::RootAuthority,
+    first: &AccountView,
+    second: &AccountView,
+) -> Result<(), ProgramError> {
+    if !first.is_signer()
+        || !second.is_signer()
+        || first.address() == second.address()
+        || !root.is_root(*first.address())
+        || !root.is_root(*second.address())
+    {
+        return Err(MetisError::TwoRootSignersRequired.into());
+    }
+    Ok(())
+}
+
 pub fn unpack<T: CheckedBitPattern> (
     data: &[u8],
     err:MetisError
@@ -141,5 +172,81 @@ mod tests {
         let zeroed = Address::default();
         println!("different address ({a} vs all-zero) -> rejected");
         assert!(require_addresses_match(&a, &zeroed, MetisError::WrongAccountReference).is_err());
+    }
+}
+
+/// Reads Config's pause flag. Everything that moves money in, creates a market, settles or
+/// sweeps checks it; user exits (claim, claim_refund) and the two-root emergency cancel do not -
+/// pausing must never trap anyone's money.
+pub fn require_not_paused(config: &AccountView) -> Result<(), ProgramError> {
+    let data = config.try_borrow()?;
+    let state = unpack::<crate::config::state::Config>(&data, MetisError::InvalidConfigAccount)?;
+    require_discriminator(state.discriminator, crate::config::state::CONFIG_DISCRIMINATOR)?;
+    if state.root.is_paused() {
+        return Err(MetisError::ProgramPaused.into());
+    }
+    Ok(())
+}
+
+/// A copy of the oracle's football account, after checking it is the real thing: owned by the
+/// oracle program, exactly the right size, right discriminator. The address is NOT checked
+/// here - callers compare it to the one the market recorded.
+pub fn read_oracle(oracle: &AccountView) -> Result<oracle::instructions::football::FootballSettled, ProgramError> {
+    if !oracle.owned_by(&oracle::ID) {
+        return Err(MetisError::InvalidOracleAccount.into());
+    }
+    let data = oracle.try_borrow()?;
+    let state = checked::try_from_bytes::<oracle::instructions::football::FootballSettled>(&data)
+        .map_err(|_| MetisError::InvalidOracleAccount)?;
+    if state.discriminator != oracle::constants::FOOTBALL_SETTLED_DISCRIMINATOR {
+        return Err(MetisError::InvalidOracleAccount.into());
+    }
+    Ok(*state)
+}
+
+/// Whether `signer` may run the gated crank instructions: a root, or a delegate that two roots
+/// attested (the same attest/remove flow every delegate in the system uses, so an operator key can
+/// be revoked the way any delegate is). `delegated` is the signer's own attestation account, only
+/// needed when the signer isn't a root.
+///
+/// Reads only: the signer's actual signature is checked separately by the caller, because some
+/// instructions open to anyone after a delay and must not demand a signer then.
+pub fn is_operator(
+    signer: &AccountView,
+    delegated: Option<&AccountView>,
+    config: &AccountView,
+) -> Result<bool, ProgramError> {
+    let config_data = config.try_borrow()?;
+    let config_state = unpack::<crate::config::state::Config>(&config_data, MetisError::InvalidConfigAccount)?;
+    require_discriminator(config_state.discriminator, crate::config::state::CONFIG_DISCRIMINATOR)?;
+    if config_state.root.is_root(*signer.address()) {
+        return Ok(true);
+    }
+    let Some(delegated) = delegated else { return Ok(false) };
+    // Only this program can create an account it owns, so owner + discriminator + the address it
+    // records is proof it is a real attestation of this very signer.
+    if !delegated.owned_by(&crate::ID) {
+        return Ok(false);
+    }
+    let data = delegated.try_borrow()?;
+    let Ok(state) = checked::try_from_bytes::<metis_authority::delegated::DelegatedAuthority>(&data) else {
+        return Ok(false);
+    };
+    Ok(state.discriminator == crate::config::state::DELEGATED_AUTHORITY_DISCRIMINATOR
+        && state.address == signer.address().to_bytes()
+        && state.is_attest_complete())
+}
+
+/// The gate: the signer must have signed, and must be a root or an attested operator.
+pub fn require_operator(
+    signer: &AccountView,
+    delegated: Option<&AccountView>,
+    config: &AccountView,
+) -> Result<(), ProgramError> {
+    require_signer(signer, MetisError::AuthorityMustSign)?;
+    if is_operator(signer, delegated, config)? {
+        Ok(())
+    } else {
+        Err(MetisError::OperatorRequired.into())
     }
 }

@@ -5,7 +5,11 @@
 use bytemuck::CheckedBitPattern;
 use pinocchio::{AccountView, Address, error::ProgramError};
 
-use crate::{constants::INDIVIDUAL_AUTHORITY_SEED, error::OracleError};
+use crate::{
+    constants::{AUTHORITY_SEED, GUARDIAN, ORACLE_AUTHORITY_DISCRIMINATOR},
+    error::OracleError,
+    state::RootAuthority,
+};
 
 pub fn require_signer(account: &AccountView, err: OracleError) -> Result<(), ProgramError> {
     if !account.is_signer() {
@@ -24,13 +28,6 @@ pub fn require_writable(account: &AccountView, err: OracleError) -> Result<(), P
 
 pub fn require_empty(account: &AccountView, err: OracleError) -> Result<(), ProgramError> {
     if !account.is_data_empty() {
-        return Err(err.into());
-    }
-    Ok(())
-}
-
-pub fn require_not_empty(account: &AccountView, err: OracleError) -> Result<(), ProgramError> {
-    if account.is_data_empty() {
         return Err(err.into());
     }
     Ok(())
@@ -78,13 +75,49 @@ pub fn derive_and_check_pda<const N: usize>(
     Ok(bump)
 }
 
-/// The individual-authority PDA for a given candidate address.
-pub fn individual_authority_address(
-    candidate: &Address,
-    program_id: &Address,
-) -> Result<(Address, u8), ProgramError> {
-    Address::derive_program_address(&[INDIVIDUAL_AUTHORITY_SEED, candidate.as_ref()], program_id)
-        .ok_or(OracleError::InvalidAuthorityPda.into())
+/// The oracle's RootAuthority account: rebuilt from its seeds rather than trusted, owned by this
+/// program, right discriminator. Reading the real account (not a compiled-in constant) is what
+/// lets the pause flag apply everywhere.
+pub fn load_root_authority(authority: &AccountView) -> Result<&RootAuthority, ProgramError> {
+    derive_and_check_pda(
+        &[AUTHORITY_SEED, GUARDIAN.as_ref()],
+        &crate::ID,
+        authority.address(),
+        OracleError::InvalidAuthorityPda,
+    )?;
+    require_owned_by(authority, &crate::ID, OracleError::InvalidAuthorityPda)?;
+    let state = unpack::<RootAuthority>(
+        unsafe { authority.borrow_unchecked() },
+        OracleError::InvalidAuthority,
+    )?;
+    require_discriminator(state.discriminator, ORACLE_AUTHORITY_DISCRIMINATOR)?;
+    Ok(state)
+}
+
+/// Nothing that changes a result, or who may report one, runs while the program is paused.
+pub fn require_not_paused(root: &RootAuthority) -> Result<(), ProgramError> {
+    if root.is_paused() {
+        return Err(OracleError::Paused.into());
+    }
+    Ok(())
+}
+
+/// Both accounts must sign, both must be current root signers, and they must be two different
+/// keys - one compromised key passed twice doesn't count.
+pub fn require_two_root_signers(
+    root: &RootAuthority,
+    first: &AccountView,
+    second: &AccountView,
+) -> Result<(), ProgramError> {
+    if !first.is_signer()
+        || !second.is_signer()
+        || first.address() == second.address()
+        || !root.is_root(*first.address())
+        || !root.is_root(*second.address())
+    {
+        return Err(OracleError::TwoRootSignersRequired.into());
+    }
+    Ok(())
 }
 
 /// `bytemuck::checked::try_from_bytes::<T>` with the crate's own error type instead of

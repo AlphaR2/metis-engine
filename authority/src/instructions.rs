@@ -22,6 +22,7 @@ use crate::{delegated::DelegatedAuthority, errors::AuthorityErrors, root::RootAu
 /// without knowing which shape they're looking at.
 pub trait RootBearing: CheckedBitPattern + NoUninit {
     fn root(&self) -> &RootAuthority;
+    fn root_mut(&mut self) -> &mut RootAuthority;
     fn discriminator(&self) -> [u8; 8];
 }
 
@@ -37,6 +38,11 @@ fn derive_root_pda(seeds: &[&[u8]], program_id: &Address) -> Option<(Address, u8
 impl RootBearing for RootAuthority {
     #[inline]
     fn root(&self) -> &RootAuthority {
+        self
+    }
+
+    #[inline]
+    fn root_mut(&mut self) -> &mut RootAuthority {
         self
     }
 
@@ -159,6 +165,12 @@ pub fn attest_authority<T: RootBearing, E: AuthorityErrors>(
         return Err(E::invalid_authority().into());
     }
     let authority_state = *authority_outer.root();
+    // Who is trusted must not change while the program is paused: pausing exists for the case
+    // where a root key is compromised, and attesting a new reporter is exactly what that
+    // attacker would do next.
+    if authority_state.is_paused() {
+        return Err(E::paused().into());
+    }
 
     let attester_is_root = authority_state.is_root(*attester.address());
 
@@ -296,6 +308,9 @@ pub fn remove_authority<T: RootBearing, E: AuthorityErrors>(
     if authority_outer.discriminator() != outer_discriminator {
         return Err(E::invalid_authority().into());
     }
+    if authority_outer.root().is_paused() {
+        return Err(E::paused().into());
+    }
     if !authority_outer.root().is_root(*root.address()) {
         return Err(E::unauthorized_authority().into());
     }
@@ -330,4 +345,100 @@ pub fn remove_authority<T: RootBearing, E: AuthorityErrors>(
     recipient.set_lamports(recipient_lamports);
     individual_authority.set_lamports(0);
     individual_authority.close()
+}
+
+/// Loads the root-bearing account for a pause/unpause call, after the same PDA, ownership and
+/// discriminator checks every other instruction here does.
+fn load_root_bearing_mut<'a, T: RootBearing, E: AuthorityErrors>(
+    authority: &'a mut AccountView,
+    program_id: &Address,
+    authority_seeds: &[&[u8]],
+    outer_discriminator: [u8; 8],
+) -> Result<&'a mut T, ProgramError> {
+    let (expected_authority, _) = derive_root_pda(authority_seeds, program_id)
+        .ok_or_else(|| E::invalid_authority_pda().into())?;
+    if &expected_authority != authority.address() || !authority.owned_by(program_id) {
+        return Err(E::invalid_authority_pda().into());
+    }
+    if !authority.is_writable() {
+        return Err(E::invalid_authority_pda().into());
+    }
+    let outer = bytemuck::checked::try_from_bytes_mut::<T>(unsafe { authority.borrow_unchecked_mut() })
+        .map_err(|_| E::invalid_authority().into())?;
+    if outer.discriminator() != outer_discriminator {
+        return Err(E::invalid_authority().into());
+    }
+    Ok(outer)
+}
+
+/// Accounts: [root, authority (writable)]
+///
+/// Any single root signer can pause: stopping things must be fast and cheap, since the case
+/// it exists for is a key being compromised right now. Resuming is the hard part (`unpause`).
+/// Pausing an already-paused program is a no-op, not an error, so a panicking operator can
+/// resend without worrying.
+pub fn pause<T: RootBearing, E: AuthorityErrors>(
+    accounts: &mut [AccountView],
+    program_id: &Address,
+    authority_seeds: &[&[u8]],
+    outer_discriminator: [u8; 8],
+) -> ProgramResult {
+    let [root, authority, _extra @ ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    if !root.is_signer() {
+        return Err(E::must_sign().into());
+    }
+    let outer = load_root_bearing_mut::<T, E>(authority, program_id, authority_seeds, outer_discriminator)?;
+    if !outer.root().is_root(*root.address()) {
+        return Err(E::unauthorized_authority().into());
+    }
+    outer.root_mut().paused = 1;
+    Ok(())
+}
+
+/// Accounts: [guardian, authority (writable), roots @ ..]
+///
+/// Needs the guardian AND `required_unpause_votes()` distinct root signers, all signing this one
+/// transaction - no stored quorum to go stale or be griefed. The guardian alone can't resume
+/// anything (its only power), and a compromised root set alone can't either.
+pub fn unpause<T: RootBearing, E: AuthorityErrors>(
+    accounts: &mut [AccountView],
+    program_id: &Address,
+    authority_seeds: &[&[u8]],
+    outer_discriminator: [u8; 8],
+) -> ProgramResult {
+    let [guardian, authority, roots @ ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    let outer = load_root_bearing_mut::<T, E>(authority, program_id, authority_seeds, outer_discriminator)?;
+    let root_state = *outer.root();
+
+    if !guardian.is_signer() || !root_state.is_guardian(*guardian.address()) {
+        return Err(E::unpause_signatures_missing().into());
+    }
+
+    // Count distinct root signers; a key listed twice counts once.
+    let mut seen = [[0u8; 32]; crate::root::MAX_ROOT_SIGNERS];
+    let mut distinct = 0usize;
+    for candidate in roots.iter() {
+        if !candidate.is_signer() || !root_state.is_root(*candidate.address()) {
+            continue;
+        }
+        let key = candidate.address().to_bytes();
+        if seen[..distinct].contains(&key) {
+            continue;
+        }
+        seen[distinct] = key;
+        distinct += 1;
+        if distinct == seen.len() {
+            break;
+        }
+    }
+    if distinct < root_state.required_unpause_votes() {
+        return Err(E::unpause_signatures_missing().into());
+    }
+
+    outer.root_mut().paused = 0;
+    Ok(())
 }

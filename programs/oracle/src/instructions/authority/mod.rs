@@ -48,3 +48,6 @@ pub use attest::*;
 
 pub mod remove;
 pub use remove::*;
+
+pub mod pause;
+pub use pause::*;

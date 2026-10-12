@@ -73,7 +73,8 @@ pub async fn run(config: Config) {
         // The first tick fires immediately, which is exactly the boot-time prime.
         loop {
             ticker.tick().await;
-            background_aggregator.refresh().await;
+            // On a failed boot (network down for a minute), retry soon rather than in a full interval.
+            background_aggregator.refresh_until_held(Duration::from_secs(60), 10).await;
         }
     });
     tracing::info!("background refresh every {refresh_interval}s");
@@ -212,6 +213,37 @@ mod tests {
         let response = h.router().oneshot(Request::get("/v1/venues").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(response.headers().contains_key("retry-after"));
+    }
+
+    #[tokio::test]
+    async fn fill_score_quotes_the_call_and_ranks_it() {
+        let h = Harness::new(0).await;
+        let (status, body) = h.get("/v1/fill-score?venue_id=scripted&venue_market_id=g1-p0-m0&side=yes&amount_usdc=10").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let score: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(score["side"], "yes");
+        assert_eq!(score["amount_usdc"], "10");
+        assert!(score["method"].as_str().unwrap().contains("Fill Score"), "the formula travels with the answer");
+        let options = score["options"].as_array().unwrap();
+        assert!(!options.is_empty());
+        let first = &options[0];
+        assert_eq!(first["venue_id"], "scripted");
+        assert_eq!(first["quoted"], true);
+        // The scripted venue quotes 20 shares for 10 USDC and reports no liquidity: fully filled, depth unknown.
+        assert_eq!(first["score"], 100);
+        assert_eq!(first["other_side_usdc"], "10");
+        assert!(first["depth_usdc"].is_null());
+    }
+
+    #[tokio::test]
+    async fn fill_score_refuses_bad_input_and_unknown_markets() {
+        let h = Harness::new(0).await;
+        assert_eq!(h.get("/v1/fill-score?venue_id=scripted&venue_market_id=nope").await.0, StatusCode::NOT_FOUND);
+        assert_eq!(h.get("/v1/fill-score?venue_id=scripted&venue_market_id=g1-p0-m0&side=maybe").await.0, StatusCode::BAD_REQUEST);
+        for amount in ["0", "-5", "ten"] {
+            let uri = format!("/v1/fill-score?venue_id=scripted&venue_market_id=g1-p0-m0&amount_usdc={amount}");
+            assert_eq!(h.get(&uri).await.0, StatusCode::BAD_REQUEST, "{amount}");
+        }
     }
 
     /// The real venues, replayed from fixtures, behind the real router.

@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1
+#
+# The hosted worker (see devnet/worker.sh): oracle keepers, crank, mock providers, the Open Pool
+# service, the demo faucet and the status endpoint, in one container. Build from this directory:
+#     docker build -f Dockerfile.worker -t metis-worker .
+#
+# BEFORE building, devnet/set-roots.sh must have been run: the programs' trust roots are compiled into
+# the tools, so an image built from the placeholders will not match the deployed programs.
+# No key, token or .env is ever baked in: .dockerignore keeps them out and the host supplies them.
+
+FROM rust:1.98-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p metis-ops -p oracle-keeper \
+      --features metis-ops/devnet,metis-ops/short-timers,oracle-keeper/devnet,oracle-keeper/short-timers \
+    && mkdir -p /out && cp target/release/metis-ops target/release/oracle-keeper /out/
+
+FROM node:22-bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 ca-certificates bash tar coreutils \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY devnet ./devnet
+COPY keepers/meteora ./keepers/meteora
+RUN cd keepers/meteora && npm ci --no-audit --no-fund
+# where devnet/common.sh looks for the tools of the devnet build
+COPY --from=build /out/metis-ops /out/oracle-keeper ./target/bin-devnet/debug/
+ENV NET=devnet DEMO_KEYS=/data/keys
+# Run as root so a mounted volume at /data is writable; the container holds only devnet demo keys.
+VOLUME /data
+EXPOSE 8090
+ENTRYPOINT ["bash", "/app/devnet/worker.sh"]

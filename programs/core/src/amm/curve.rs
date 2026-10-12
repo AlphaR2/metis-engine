@@ -425,7 +425,7 @@ mod tests {
     // sizes.
     //
     // IMPORTANT: this only shows a clean monotonic curve at REALISTIC scale.
-    // Every real market seeds with at least MIN_SEED = 20_000_000 (millionths),
+    // Every real market seeds with at least MIN_SEED = 30_000_000 (millionths),
     // not a toy number like 100. At tiny integer scale isqrt's floor-rounding
     // isn't a small correction any more, it's the dominant effect, and the
     // "bigger bet slips more" property gets swamped by rounding noise - try
@@ -1051,7 +1051,7 @@ mod tests {
     // (seed = $20, k = 30 -> virtual_per_side ~= 424.26).
     #[test]
     fn virtual_liquidity_matches_mvp_worked_example() {
-        let seed = crate::constants::MIN_SEED; // dial: $20, MVP's fixed seed
+        let seed = 20_000_000u64; // dial: $20, the docs' worked example (pinned; MIN_SEED is now $30)
         let k = 30u64; // dial: docs/mvp.md 1.4's k
 
         let q0 = symmetric_seed(seed, 2);
@@ -1094,7 +1094,7 @@ mod tests {
     // materially less - that shrinkage is the entire point of 1.4.
     #[test]
     fn virtual_liquidity_shrinks_price_impact_vs_mvp_worked_example() {
-        let seed = crate::constants::MIN_SEED; // dial: $20
+        let seed = 20_000_000u64; // dial: $20, the docs' worked example (pinned; MIN_SEED is now $30)
         let bet = 50_000_000u64; // dial: $50
         let k = 30u64; // dial
 

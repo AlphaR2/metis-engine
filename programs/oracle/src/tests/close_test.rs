@@ -45,7 +45,7 @@ pub mod close_oracle {
         svm.set_sysvar(&clock);
         let program_bytes = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../target/deploy/metis-oracle.so"
+            "/../../target/deploy/oracle.so"
         ))
         .expect("build the SBF program first: cargo build-sbf");
         svm.add_program(program_id(), &program_bytes)
@@ -83,16 +83,23 @@ pub mod close_oracle {
             },
         )
         .unwrap();
+        // Close only works on a real football oracle that has been final for the grace period.
+        let mut football = crate::instructions::football::FootballSettled::new(FIXTURE_MERKLE_ROOT, 100, 0);
+        football.finalized = 1;
+        football.finished_at = 1i64.to_le_bytes();
         svm.set_account(
             oracle,
             Account {
                 lamports: 2_000_000,
-                data: [0u8].into_iter().chain(FIXTURE_MERKLE_ROOT).collect(),
+                data: football.as_bytes().to_vec(),
                 owner: program_id(),
                 ..Default::default()
             },
         )
         .unwrap();
+        let mut clock = svm.get_sysvar::<Clock>();
+        clock.unix_timestamp = 1 + crate::constants::CLOSE_GRACE_SECS;
+        svm.set_sysvar(&clock);
 
         let close_accounts = |initiator_signer, voter, voter_signer| {
             vec![

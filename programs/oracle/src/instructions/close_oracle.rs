@@ -9,10 +9,13 @@ use pinocchio_system::instructions::CreateAccount;
 use shank::ShankType;
 
 use crate::{
-    constants::{AUTHORITY_SEED, CLOSER_QUORUM_SEED, GUARDIAN},
+    constants::{CLOSER_QUORUM_SEED, CLOSE_GRACE_SECS, FOOTBALL_SETTLED_DISCRIMINATOR},
     error::OracleError,
-    state::{CloserQuorum, RootAuthority},
+    instructions::football::FootballSettled,
+    state::CloserQuorum,
+    validation::{load_root_authority, require_not_paused},
 };
+use pinocchio::sysvars::clock::Clock;
 
 #[repr(C)]
 #[derive(NoUninit, CheckedBitPattern, Clone, Copy, ShankType)]
@@ -79,19 +82,23 @@ pub fn process_close_oracle(accounts: &mut [AccountView], data: &[u8]) -> Progra
         {
             return Err(OracleError::InvalidOraclePda.into());
         }
+
+        // A result can't be closed away while markets may still need it. It has to be a real
+        // football oracle (exact size, right discriminator), and CLOSE_GRACE_SECS must have
+        // passed since it was finalised or voided - or, if it never finished, since kickoff.
+        let football = bytemuck::checked::try_from_bytes::<FootballSettled>(&oracle_data)
+            .map_err(|_| OracleError::InvalidFootballData)?;
+        if football.discriminator != FOOTBALL_SETTLED_DISCRIMINATOR {
+            return Err(OracleError::InvalidGenericOracleData.into());
+        }
+        let now = Clock::get()?.unix_timestamp;
+        if now < football.closable_at(CLOSE_GRACE_SECS) {
+            return Err(OracleError::CloseTooEarly.into());
+        }
     }
 
-    let (expected_authority, _) =
-        Address::derive_program_address(&[AUTHORITY_SEED, GUARDIAN.as_ref()], &crate::ID)
-            .ok_or(OracleError::InvalidAuthorityPda)?;
-    if expected_authority != *authority.address() || !authority.owned_by(&crate::ID) {
-        return Err(OracleError::InvalidAuthorityPda.into());
-    }
-
-    let authority_state = *bytemuck::checked::try_from_bytes::<RootAuthority>(unsafe {
-        authority.borrow_unchecked()
-    })
-    .map_err(|_| OracleError::InvalidAuthority)?;
+    let authority_state = *load_root_authority(authority)?;
+    require_not_paused(&authority_state)?;
 
     let quorum_seeds: [&[u8]; 2] = [CLOSER_QUORUM_SEED, oracle.address().as_ref()];
 

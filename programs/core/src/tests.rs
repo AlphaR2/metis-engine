@@ -18,8 +18,9 @@ use crate::{amm, config, settlement};
 // neither carries a discriminator of ours any more.
 #[test]
 fn discriminators_are_all_distinct_across_every_part() {
-    let account_discs: [(&str, [u8; 8]); 2] = [
+    let account_discs: [(&str, [u8; 8]); 3] = [
         ("Market", amm::state::MARKET_DISCRIMINATOR),
+        ("MarketMetadata", amm::metadata::MARKET_METADATA_DISCRIMINATOR),
         ("Config", config::state::CONFIG_DISCRIMINATOR),
     ];
 
@@ -40,13 +41,27 @@ fn discriminators_are_all_distinct_across_every_part() {
 
     // Every instruction the dispatcher matches on belongs in this list. Adding
     // one to lib.rs without adding it here leaves the collision unchecked.
-    let ix_discs: [(&str, [u8; 8]); 6] = [
+    let ix_discs: [(&str, [u8; 8]); 19] = [
         ("initialize_market", amm::state::INITIALIZE_MARKET),
+        ("set_metadata", amm::state::SET_METADATA),
         ("place_bet", amm::state::PLACE_BET),
+        ("close_primary", amm::state::CLOSE_PRIMARY),
         ("settle_market", settlement::state::SETTLE_MARKET),
+        ("sweep_fees", settlement::state::SWEEP_FEES),
         ("claim", settlement::state::CLAIM),
+        ("cancel_market", settlement::state::CANCEL_MARKET),
+        ("claim_refund", settlement::state::CLAIM_REFUND),
+        ("close_market", settlement::state::CLOSE_MARKET),
+        ("forfeit_creator_fees", settlement::state::FORFEIT_CREATOR_FEES),
         ("initialize_config", config::state::INITIALIZE_CONFIG),
         ("update_config", config::state::UPDATE_CONFIG),
+        ("update_config_critical", config::state::UPDATE_CONFIG_CRITICAL),
+        ("pause", config::state::PAUSE),
+        ("unpause", config::state::UNPAUSE),
+        ("attest_authority", config::state::ATTEST_AUTHORITY),
+        ("remove_authority", config::state::REMOVE_AUTHORITY),
+        // The authority account's discriminator is an instruction-sized tag too.
+        ("delegated_authority", config::state::DELEGATED_AUTHORITY_DISCRIMINATOR),
     ];
 
     println!("instruction discriminators:");

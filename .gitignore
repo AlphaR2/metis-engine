@@ -29,3 +29,12 @@ Thumbs.db
 test-ledger/
 .surfpool/
 *.log
+
+# Throwaway keys for the local validator run (never used on a real network)
+/localnet/keys/
+/localnet/ledger/
+
+
+# Demo keys and run state written by devnet/*.sh (hot keys for the demo only; never commit)
+/devnet/keys-*/
+devnet/keys-devnet/root1.json

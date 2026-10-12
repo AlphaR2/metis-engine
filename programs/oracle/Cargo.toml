@@ -8,6 +8,16 @@ name = "oracle"
 crate-type = ["cdylib", "lib"]
 
 
+[features]
+no-entrypoint = []
+# Network trust roots, forwarded to metis-authority (see authority/src/network.rs).
+devnet = ["metis-authority/devnet"]
+mainnet = ["metis-authority/mainnet"]
+# Demo timers (windows of seconds/minutes instead of hours/days). Independent of the trust roots, so a
+# devnet demo can use its own real roots with short timers. NEVER with `mainnet` (compile_error).
+short-timers = []
+localnet = ["metis-authority/localnet", "short-timers"]
+
 [dependencies]
 pinocchio = { workspace = true }
 solana-address = { workspace = true }

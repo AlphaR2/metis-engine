@@ -108,6 +108,76 @@ pub enum MetisError {
 
     /// A non-root attester tried to finish off a candidate no root has touched yet.
     MissingRootAttestation = 26,
+
+    /// A Config dial is outside the hardcoded bound in constants.rs.
+    ConfigValueOutOfBounds = 27,
+
+    /// The instruction needs two distinct root signers and didn't get them.
+    TwoRootSignersRequired = 28,
+
+    /// The program is paused by a root signer; nothing that moves money or changes trust runs.
+    ProgramPaused = 29,
+
+    /// Unpause needs the guardian plus the required number of distinct root signers.
+    UnpauseSignaturesMissing = 30,
+
+    // ── Oracle-driven settlement
+    /// The oracle account passed isn't the one this market was created against.
+    OracleMismatch = 31,
+    /// The oracle isn't a real football oracle (wrong owner, size or discriminator).
+    InvalidOracleAccount = 32,
+    /// The oracle has no final result yet.
+    OracleNotFinal = 33,
+    /// The oracle's result is final but the market's dispute window hasn't passed.
+    DisputeWindowOpen = 34,
+    /// The oracle voided the result; the market must be cancelled, not settled.
+    OracleVoided = 35,
+    /// The oracle is already past kickoff, finished or voided, or kickoff is too close.
+    OracleNotScheduled = 36,
+    /// The market's condition isn't one the program knows.
+    InvalidCondition = 37,
+
+    // ── Cancel, refund, sweep, close
+    /// Cancelling needs a voided oracle, a result overdue by CANCEL_AFTER_SECS, or two roots.
+    CancelNotAllowed = 38,
+    MarketNotCancelled = 39,
+    /// Nothing is owed to the sweeping party (already swept, or never settled).
+    NothingToSweep = 40,
+    /// close_market before CLAIM_WINDOW_SECS has passed since settlement/cancellation.
+    ClaimWindowOpen = 41,
+    /// close_primary before primary_end.
+    PrimaryStillOpen = 42,
+    /// Metadata text is empty, too long, not UTF-8, or has control characters.
+    InvalidMetadata = 43,
+    /// close_market while the creator's fees are still unclaimed. (The protocol's share doesn't
+    /// block closing: it is swept to the treasury as part of it.)
+    FeesUnswept = 44,
+
+    // ── Gated instructions
+    /// The signer is neither a root nor an attested operator.
+    OperatorRequired = 45,
+    /// forfeit_creator_fees before CREATOR_CLAIM_SECS has passed since settlement.
+    ForfeitTooEarly = 46,
+    /// forfeit_creator_fees on a market whose creator has nothing unclaimed.
+    NothingToForfeit = 47,
+
+    // ── DBC backing
+    /// A backed market was requested while Config.dbc_backing_enabled is off.
+    BackingDisabled = 48,
+    /// The raise deadline is outside [MIN_RAISE_SECS, MAX_RAISE_SECS] from now, or after betting would close.
+    RaiseDeadlineInvalid = 49,
+    /// activate_market after the raise deadline.
+    RaiseDeadlinePassed = 50,
+    /// cancel_pending_market before the deadline, by someone who is not an operator.
+    RaiseNotExpired = 51,
+    /// The backer mint is not the one the market recorded, still has a mint or freeze authority, or has no supply.
+    BackerMintInvalid = 52,
+    /// The vault does not hold the market's seed yet.
+    SeedNotFunded = 53,
+    /// claim_backer on a market that was not seeded by backers.
+    NotBackerMarket = 54,
+    /// claim_backer with no backer tokens, or on a market whose seed shares are already gone.
+    NothingToRedeem = 55,
 }
 
 impl From<MetisError> for ProgramError {
@@ -143,5 +213,11 @@ impl metis_authority::errors::AuthorityErrors for MetisError {
     }
     fn missing_root_attestation() -> Self {
         MetisError::MissingRootAttestation
+    }
+    fn paused() -> Self {
+        MetisError::ProgramPaused
+    }
+    fn unpause_signatures_missing() -> Self {
+        MetisError::UnpauseSignaturesMissing
     }
 }
