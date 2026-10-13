@@ -145,17 +145,18 @@ async fn request_quote(
     intent: &BuyIntent,
     side: &str,
 ) -> Result<PantaQuoteResponse, AdapterError> {
-    let response = client
-        .post(format!("{base_url}/primaryorderquote/"))
-        .header("X-Api-Key", api_key)
-        .json(&serde_json::json!({
+    let response = super::retry::post_json(
+        client,
+        &format!("{base_url}/primaryorderquote/"),
+        api_key,
+        &serde_json::json!({
             "wallet": intent.wallet,
             "marketId": intent.venue_market_id,
             "side": side,
             "amountUsdc": intent.amount_usdc.to_string(),
-        }))
-        .send()
-        .await?;
+        }),
+    )
+    .await?;
     let response = check_status(response, "panta order quote").await?;
     parse_json_with_diagnostics(response, "panta order quote").await.map_err(AdapterError::Parse)
 }
@@ -204,16 +205,17 @@ pub async fn build_buy(
     let quoted_shares = parse_decimal("quote shares", &quote.shares)?;
     let max_slippage = slippage_bps(intent.min_shares_out, quoted_shares);
 
-    let response = client
-        .post(format!("{base_url}/primaryorderbuild/"))
-        .header("X-Api-Key", api_key)
-        .json(&serde_json::json!({
+    let response = super::retry::post_json(
+        client,
+        &format!("{base_url}/primaryorderbuild/"),
+        api_key,
+        &serde_json::json!({
             "quoteId": quote_id,
             "wallet": intent.wallet,
             "maxSlippageBps": max_slippage,
-        }))
-        .send()
-        .await?;
+        }),
+    )
+    .await?;
     let response = check_status(response, "panta order build").await?;
     let built: PantaOrderBuildResponse =
         parse_json_with_diagnostics(response, "panta order build").await.map_err(AdapterError::Parse)?;

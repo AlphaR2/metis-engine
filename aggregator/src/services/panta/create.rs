@@ -273,12 +273,7 @@ pub async fn build_create_market(
         oracle: oracle_param(intent),
     };
 
-    let response = client
-        .post(format!("{base_url}/markets/create/quote/"))
-        .header("X-Api-Key", api_key)
-        .json(&quote_body)
-        .send()
-        .await?;
+    let response = super::retry::post_json(client, &format!("{base_url}/markets/create/quote/"), api_key, &quote_body).await?;
     let response = checked(response, "quote").await?;
     let quote: PantaCreateQuoteResponse =
         parse_json_with_diagnostics(response, "panta create quote").await.map_err(AdapterError::Parse)?;
@@ -287,12 +282,7 @@ pub async fn build_create_market(
     let build_body =
         PantaCreateBuildRequest { create_id: quote.create_id.clone(), wallet: intent.wallet.clone() };
 
-    let response = client
-        .post(format!("{base_url}/markets/create/build/"))
-        .header("X-Api-Key", api_key)
-        .json(&build_body)
-        .send()
-        .await?;
+    let response = super::retry::post_json(client, &format!("{base_url}/markets/create/build/"), api_key, &build_body).await?;
     let response = checked(response, "build").await?;
     let built: PantaCreateBuildResponse =
         parse_json_with_diagnostics(response, "panta create build").await.map_err(AdapterError::Parse)?;
