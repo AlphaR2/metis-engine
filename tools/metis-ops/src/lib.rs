@@ -329,6 +329,22 @@ pub fn cancel(signer: &Pubkey, market: &Pubkey, oracle: &Pubkey) -> Instruction 
     }
 }
 
+/// Two distinct roots cancel an unsettled market at any time (an emergency tool: everyone gets their money back,
+/// no winner is chosen). Used to clean up demo markets that will never get a result.
+pub fn cancel_by_roots(root_a: &Pubkey, root_b: &Pubkey, market: &Pubkey, oracle: &Pubkey) -> Instruction {
+    Instruction {
+        program_id: core_program(),
+        accounts: vec![
+            m(market, false, true),
+            m(oracle, false, false),
+            m(&config_address(), false, false),
+            m(root_a, true, false),
+            m(root_b, true, false),
+        ],
+        data: CANCEL_MARKET.to_vec(),
+    }
+}
+
 /// One root pauses the market program: nothing that moves money or changes trust runs, except
 /// claims, refunds and the two-root cancel.
 pub fn pause(root: &Pubkey) -> Instruction {

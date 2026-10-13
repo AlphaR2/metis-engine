@@ -62,10 +62,13 @@ PY
 
 case ${1:?seed|live|backed|one} in
   seed)
-    one 90001 Nigeria Ghana 21600 home-win "Will Nigeria beat Ghana?" "YES if Nigeria lead after 90 minutes, stoppage time included." "Nigeria win" "Draw or Ghana"
-    one 90001 Nigeria Ghana 21600 home-win-by-over:1 "Will Nigeria beat Ghana by 2 or more?" "YES if Nigeria win by two goals or more after 90 minutes." "Nigeria by 2+" "Anything else"
-    one 90002 Senegal Cameroon 108000 home-win "Will Senegal beat Cameroon?" "YES if Senegal lead after 90 minutes, stoppage time included." "Senegal win" "Draw or Cameroon"
-    one 90002 Senegal Cameroon 108000 goals-over:2 "Will Senegal v Cameroon have 3 or more goals?" "YES if three or more goals are scored in 90 minutes." "3+ goals" "2 or fewer" ;;
+    # Match ids are unique per run: the oracle account of a match is derived from its id, so a fixed id could
+    # only ever be registered once (a second run would fail with oracle error 6002 "already exists").
+    M1=$(( 100000 + $(date +%s) - 1790000000 )); M2=$(( M1 + 1 ))
+    one $M1 Nigeria Ghana 21600 home-win "Will Nigeria beat Ghana?" "YES if Nigeria lead after 90 minutes, stoppage time included." "Nigeria win" "Draw or Ghana"
+    one $M1 Nigeria Ghana 21600 home-win-by-over:1 "Will Nigeria beat Ghana by 2 or more?" "YES if Nigeria win by two goals or more after 90 minutes." "Nigeria by 2+" "Anything else"
+    one $M2 Senegal Cameroon 108000 home-win "Will Senegal beat Cameroon?" "YES if Senegal lead after 90 minutes, stoppage time included." "Senegal win" "Draw or Cameroon"
+    one $M2 Senegal Cameroon 108000 goals-over:2 "Will Senegal v Cameroon have 3 or more goals?" "YES if three or more goals are scored in 90 minutes." "3+ goals" "2 or fewer" ;;
   live)
     ID=$(( 91000 + $(cat "$NONCE_FILE") + 1 ))
     one $ID Nigeria Ghana "${2:-330}" home-win "Will Nigeria beat Ghana? (live demo $ID)" "YES if Nigeria lead after 90 minutes, stoppage time included." "Nigeria win" "Draw or Ghana"

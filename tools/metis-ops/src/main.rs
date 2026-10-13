@@ -21,6 +21,8 @@
 //!   metis-ops settle|cancel --signer <kp> --market <pk> --oracle <pk>
 //!   metis-ops pause         --root <kp>
 //!   metis-ops unpause       --guardian <kp> --root-a <kp> --root-b <kp>
+//!   metis-ops markets       (every market on chain: address, status, oracle)
+//!   metis-ops cancel-roots  --root-a <kp> --root-b <kp> --market <pk> --oracle <pk>   (two roots cancel an unsettled market)
 //!   metis-ops show          --market <pk>
 //!   metis-ops market-json   --market <pk>   (one line of JSON, for scripts)
 //!   metis-ops pubkey        --keypair <kp>   (prints that keypair's public address; the secret is never printed)
@@ -250,6 +252,23 @@ async fn run(command: &str, args: Args) -> Result<(), String> {
             let (a, b) = (args.keypair("root-a")?, args.keypair("root-b")?);
             let ix = forfeit(&a.pubkey(), &b.pubkey(), &args.key("market")?, &args.key("mint")?, &args.key("treasury")?);
             println!("{}", send(&client, &[&a, &b], &[ix]).await?);
+        }
+        "markets" => {
+            let rows = client.get_program_accounts(&core_program()).await.map_err(|e| e.to_string())?;
+            for (address, account) in rows {
+                if account.data.len() != core::mem::size_of::<metis_core::amm::state::Market>() {
+                    continue; // metadata, books and the config share this program
+                }
+                if let Ok(m) = bytemuck::try_pod_read_unaligned::<metis_core::amm::state::Market>(&account.data) {
+                    let status = metis_core::amm::state::MarketStatus::try_from(m.status).map(|s| format!("{s:?}")).unwrap_or_else(|_| "Unknown".into());
+                    println!("{address} {status} {} {}", Pubkey::new_from_array(m.oracle.to_bytes()), m.bet_close_ts);
+                }
+            }
+        }
+        "cancel-roots" => {
+            let (a, b) = (args.keypair("root-a")?, args.keypair("root-b")?);
+            let (market, oracle) = (args.key("market")?, args.key("oracle")?);
+            println!("{}", send(&client, &[&a, &b], &[cancel_by_roots(&a.pubkey(), &b.pubkey(), &market, &oracle)]).await?);
         }
         "settle" | "cancel" => {
             let who = args.keypair("signer")?;
