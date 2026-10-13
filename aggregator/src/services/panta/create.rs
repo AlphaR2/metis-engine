@@ -124,6 +124,17 @@ fn native_create_category(requested: &str) -> Option<&'static str> {
     CREATE_CATEGORIES.into_iter().find(|c| Category::from(*c) == requested)
 }
 
+/// The optional `oracle` Panta records beside the sources of truth, from `venue_params.oracle`.
+fn oracle_param(intent: &CreateMarketIntent) -> Option<String> {
+    intent
+        .venue_params
+        .as_ref()
+        .and_then(|p| p.get("oracle"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Builds the itemized cost from whichever figures Panta returned.
 ///
 /// The total is Panta's own number, never a sum of the parts — if the breakdown doesn't reconcile
@@ -205,6 +216,7 @@ pub async fn build_create_market(
         title: intent.title.clone(),
         description: intent.description.clone(),
         region: intent.region.clone(),
+        oracle: oracle_param(intent),
     };
 
     let response = client
@@ -347,6 +359,16 @@ mod tests {
     #[test]
     fn a_well_formed_intent_validates() {
         assert!(validate(&intent(), NOW).is_ok());
+    }
+
+    #[test]
+    fn the_oracle_is_sent_only_when_named() {
+        let mut i = intent();
+        assert_eq!(oracle_param(&i), None);
+        i.venue_params = Some(serde_json::json!({"oracle": "  https://www.premierleague.com/fixtures  "}));
+        assert_eq!(oracle_param(&i).as_deref(), Some("https://www.premierleague.com/fixtures"));
+        i.venue_params = Some(serde_json::json!({"oracle": "   "}));
+        assert_eq!(oracle_param(&i), None);
     }
 
     #[test]

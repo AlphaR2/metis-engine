@@ -301,6 +301,10 @@ pub struct PantaCreateQuoteRequest {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// Where the answer is read from, written to the market's oracle metadata. Panta defaults it to the
+    /// sources of truth joined by commas, so it is only sent when the caller names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<String>,
 }
 
 /// `POST /markets/create/quote/` response.
