@@ -36,6 +36,41 @@ const MIN_START_DELAY_SECS: i64 = 3_600;
 const MAX_QUESTION: usize = 512;
 const MAX_RESOLUTION_RULE: usize = 2_048;
 const MAX_IMAGE_URL: usize = 2_048;
+
+/// Panta's program refuses a scheduled Breaking market that starts further out than this
+/// (`BreakingEventTooFarFutureUsdc`, error 6090). A later event is a Standard market.
+const BREAKING_MAX_START_SECS: i64 = 72 * 3_600;
+/// A market that has not started yet must run for at least this long.
+const MIN_DURATION_SECS: i64 = 15 * 60;
+
+/// Which of Panta's two market types this is, from `venue_params`.
+///
+/// `market_type`: `standard` (default; starts 3+ days out in Panta's own UI, flat fee about 50 USDC) or
+/// `breaking` (an event in progress or starting within 72 hours, flat fee about 20 USDC; the quote shows the real
+/// fee). `event_in_progress` is only valid on a Breaking market and skips the one-hour start delay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CreateParams {
+    breaking: bool,
+    in_progress: bool,
+}
+
+fn create_params(intent: &CreateMarketIntent) -> Result<CreateParams, AdapterError> {
+    let params = intent.venue_params.as_ref();
+    let text = |key: &str| params.and_then(|p| p.get(key)).and_then(|v| v.as_str()).map(|s| s.trim().to_ascii_lowercase());
+    let breaking = match text("market_type").as_deref() {
+        None | Some("") | Some("standard") => false,
+        Some("breaking") => true,
+        Some(other) => return Err(AdapterError::InvalidRequest(format!("market_type must be standard or breaking, not '{other}'"))),
+    };
+    let in_progress = match params.and_then(|p| p.get("event_in_progress")) {
+        None => false,
+        Some(v) => v.as_bool().unwrap_or_else(|| matches!(v.as_str().map(str::to_ascii_lowercase).as_deref(), Some("true") | Some("1")) || v.as_i64() == Some(1)),
+    };
+    if in_progress && !breaking {
+        return Err(AdapterError::InvalidRequest("only a Breaking market can cover an event that is already in progress".into()));
+    }
+    Ok(CreateParams { breaking, in_progress })
+}
 const MAX_SOURCES: usize = 20;
 
 /// If Panta gives us no blockhash hint, assume the usual Solana window rather than claiming the
@@ -54,7 +89,8 @@ pub const CREATE_REF_PREFIX: &str = "create:";
 ///
 /// Every message names the field and the actual limit, because "invalid parameters" on a form the
 /// user just spent minutes filling in is not a usable error.
-fn validate(intent: &CreateMarketIntent, now: i64) -> Result<(), AdapterError> {
+fn validate(intent: &CreateMarketIntent, now: i64) -> Result<CreateParams, AdapterError> {
+    let kind = create_params(intent)?;
     let invalid = |msg: String| Err(AdapterError::InvalidRequest(msg));
 
     // Checked here, not left to Panta: its 400 would come back as a retryable venue outage, and a
@@ -94,12 +130,29 @@ fn validate(intent: &CreateMarketIntent, now: i64) -> Result<(), AdapterError> {
         return invalid("imageUrl must be an http(s) URL".into());
     }
 
-    // Times must be strictly ordered, and the start far enough ahead.
-    if intent.start_time < now + MIN_START_DELAY_SECS {
-        return invalid(format!(
-            "startTime must be at least {} minutes ahead of now",
-            MIN_START_DELAY_SECS / 60
-        ));
+    // Times must be strictly ordered, and the start far enough ahead. Only an event already in progress (Breaking)
+    // may start in the past.
+    if kind.in_progress {
+        if intent.start_time > now {
+            return invalid("an event in progress must have already started".into());
+        }
+        if intent.end_time <= now {
+            return invalid("endTime must still be in the future".into());
+        }
+    } else {
+        if intent.start_time < now + MIN_START_DELAY_SECS {
+            return invalid(format!(
+                "startTime must be at least {} minutes ahead of now{}",
+                MIN_START_DELAY_SECS / 60,
+                if kind.breaking { "" } else { " (for something already happening, use a Breaking market)" }
+            ));
+        }
+        if kind.breaking && intent.start_time > now + BREAKING_MAX_START_SECS {
+            return invalid("a Breaking market must start within 72 hours; for a later event use a Standard market".into());
+        }
+        if intent.end_time - intent.start_time < MIN_DURATION_SECS {
+            return invalid("the event must run for at least 15 minutes".into());
+        }
     }
     if intent.end_time <= intent.start_time {
         return invalid("endTime must be after startTime".into());
@@ -115,7 +168,7 @@ fn validate(intent: &CreateMarketIntent, now: i64) -> Result<(), AdapterError> {
             CREATE_CATEGORIES.join(", ")
         ));
     }
-    Ok(())
+    Ok(kind)
 }
 
 /// Panta's own spelling of `requested`, if creation accepts it.
@@ -191,7 +244,7 @@ pub async fn build_create_market(
     intent: &CreateMarketIntent,
 ) -> Result<UnsignedTransaction, AdapterError> {
     let now = now_unix();
-    validate(intent, now)?;
+    let kind = validate(intent, now)?;
 
     let native_category =
         native_create_category(&intent.category).expect("validate() already rejected unsupported categories");
@@ -212,7 +265,8 @@ pub async fn build_create_market(
         end_time: intent.end_time,
         resolution_time: intent.resolution_time,
         image_url: intent.image_url.trim().to_string(),
-        market_type: None,
+        market_type: Some(if kind.breaking { "breaking" } else { "standard" }.to_string()),
+        event_in_progress: kind.breaking.then_some(kind.in_progress),
         title: intent.title.clone(),
         description: intent.description.clone(),
         region: intent.region.clone(),
@@ -369,6 +423,65 @@ mod tests {
         assert_eq!(oracle_param(&i).as_deref(), Some("https://www.premierleague.com/fixtures"));
         i.venue_params = Some(serde_json::json!({"oracle": "   "}));
         assert_eq!(oracle_param(&i), None);
+    }
+
+    fn breaking(i: &mut CreateMarketIntent, in_progress: bool) {
+        i.venue_params = Some(serde_json::json!({"market_type": "breaking", "event_in_progress": in_progress}));
+    }
+
+    #[test]
+    fn a_breaking_market_must_start_within_72_hours() {
+        let mut i = intent();
+        breaking(&mut i, false);
+        assert!(validate(&i, NOW).is_ok(), "2 hours out is fine");
+        i.start_time = NOW + 71 * HOUR;
+        i.end_time = i.start_time + 3 * HOUR;
+        i.resolution_time = i.end_time + HOUR;
+        assert!(validate(&i, NOW).is_ok());
+        i.start_time = NOW + 73 * HOUR;
+        i.end_time = i.start_time + 3 * HOUR;
+        i.resolution_time = i.end_time + HOUR;
+        assert!(validate(&i, NOW).unwrap_err().to_string().contains("72 hours"));
+    }
+
+    #[test]
+    fn a_standard_market_does_not_have_the_72_hour_cap_and_says_when_it_is_too_soon() {
+        let mut i = intent();
+        i.start_time = NOW + 200 * HOUR;
+        i.end_time = i.start_time + 3 * HOUR;
+        i.resolution_time = i.end_time + HOUR;
+        assert!(validate(&i, NOW).is_ok());
+        i.start_time = NOW + 60;
+        assert!(validate(&i, NOW).unwrap_err().to_string().contains("Breaking"));
+    }
+
+    #[test]
+    fn only_a_breaking_market_may_be_in_progress() {
+        let mut i = intent();
+        i.start_time = NOW - 600;
+        i.end_time = NOW + 2 * HOUR;
+        i.resolution_time = i.end_time + HOUR;
+        i.venue_params = Some(serde_json::json!({"event_in_progress": true}));
+        assert!(validate(&i, NOW).is_err(), "standard cannot be in progress");
+        breaking(&mut i, true);
+        assert_eq!(validate(&i, NOW).unwrap(), CreateParams { breaking: true, in_progress: true });
+        i.start_time = NOW + 600;
+        assert!(validate(&i, NOW).is_err(), "in progress means already started");
+    }
+
+    #[test]
+    fn a_market_that_has_not_started_must_run_15_minutes() {
+        let mut i = intent();
+        i.end_time = i.start_time + 10 * 60;
+        i.resolution_time = i.end_time + HOUR;
+        assert!(validate(&i, NOW).unwrap_err().to_string().contains("15 minutes"));
+    }
+
+    #[test]
+    fn an_unknown_market_type_is_refused() {
+        let mut i = intent();
+        i.venue_params = Some(serde_json::json!({"market_type": "turbo"}));
+        assert!(validate(&i, NOW).is_err());
     }
 
     #[test]

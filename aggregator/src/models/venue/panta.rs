@@ -294,6 +294,9 @@ pub struct PantaCreateQuoteRequest {
     pub image_url: String,
     #[serde(rename = "marketType", skip_serializing_if = "Option::is_none")]
     pub market_type: Option<String>,
+    /// Only valid on a Breaking market: skips the minimum start delay for an event already underway.
+    #[serde(rename = "eventInProgress", skip_serializing_if = "Option::is_none")]
+    pub event_in_progress: Option<bool>,
     /// Defaults to `question` when omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
