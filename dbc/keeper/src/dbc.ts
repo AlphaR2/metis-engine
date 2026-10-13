@@ -7,7 +7,8 @@ import {
 import type { Env } from "./env.js";
 import type { Store } from "./store.js";
 
-export const log = (...a: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...a);
+/** Progress lines. To stdout normally; to stderr when a caller captures stdout for the result (KEEPER_LOG_STDERR=1). */
+export const log = (...a: unknown[]) => (process.env.KEEPER_LOG_STDERR ? console.error : console.log)(new Date().toISOString().slice(11, 19), ...a);
 
 export const dbcClient = (env: Env) => new DynamicBondingCurveClient(env.conn, "confirmed");
 

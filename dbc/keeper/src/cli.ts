@@ -75,4 +75,8 @@ async function main() {
     default: console.log(USAGE);
   }
 }
-main().catch((e) => { console.error("keeper:", String(e?.stack ?? e).slice(0, 2000)); process.exit(1); });
+// One-shot commands must exit by themselves: an RPC connection left open would otherwise keep the process (and a demo job
+// waiting on it) alive for ever. `serve` and `watch` never return, so they are not affected.
+main()
+  .then(() => { if (!["serve", "watch"].includes(process.argv[2] ?? "")) process.exit(0); })
+  .catch((e) => { console.error("keeper:", String(e?.stack ?? e).slice(0, 2000)); process.exit(1); });
