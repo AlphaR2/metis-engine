@@ -17,6 +17,27 @@ LOG=$RUN/markets.tsv; touch "$LOG" "$RUN/fixtures.tsv"
 NONCE_FILE=$D/nonce; [ -f "$NONCE_FILE" ] || echo 0 > "$NONCE_FILE"
 NO_RESTART=${NO_RESTART:-}
 
+# Registers the ORACLE for one match: the fixture account on chain, the reporters' watch list, and the practice feeds.
+# No market. Sets ROOT and ORA for the caller.
+make_fixture() {  # matchId home away kickoff_unix
+  local MATCH=$1 HOME_T=$2 AWAY_T=$3 KICK=$4 OUT
+  OUT=$(KEEPER_KEYPAIR=$D/reporter1.json $KEEPER create-fixture --kickoff $KICK --id football-data=$MATCH)
+  ROOT=$(echo "$OUT" | awk '/^fixture_root:/{print $2}'); ORA=$(echo "$OUT" | awk '/^oracle:/{print $2}')
+  [ -n "$ROOT" ] && [ -n "$ORA" ] || { echo "create-fixture failed: $OUT"; exit 1; }
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$MATCH" "$ROOT" "$ORA" "$KICK" "$HOME_T" "$AWAY_T" >> "$RUN/fixtures.tsv"
+  python3 -I - "$RUN/watch.json" "$ROOT" "$MATCH" <<'PY'
+import json,sys
+p,root,mid=sys.argv[1:]
+w=json.load(open(p)); w.append({"fixture_root":root,"external_id":mid}); json.dump(w,open(p,"w"))
+PY
+  for i in 1 2; do python3 -I - "$RUN/mock-$i.json" "$MATCH" <<'PY'
+import json,sys
+p,mid=sys.argv[1:]
+s=json.load(open(p)); s[mid]={"status":"SCHEDULED","home":None,"away":None}; json.dump(s,open(p,"w"))
+PY
+  done
+}
+
 one() {  # matchId home away lead condition question rubric_yes label_yes label_no
   local MATCH=$1 HOME_T=$2 AWAY_T=$3 LEAD=$4 COND=$5 Q=$6 RY=$7 LY=$8 LN=$9
   # The nonce is part of the market's address and of its outcome tokens' addresses, and a closed market leaves its
@@ -31,21 +52,7 @@ one() {  # matchId home away lead condition question rubric_yes label_yes label_
     ROOT=$(awk -F'\t' -v m="$MATCH" '$1==m{print $2}' "$RUN/fixtures.tsv"); ORA=$(awk -F'\t' -v m="$MATCH" '$1==m{print $3}' "$RUN/fixtures.tsv")
     KICK=$(awk -F'\t' -v m="$MATCH" '$1==m{print $4}' "$RUN/fixtures.tsv")   # the fixture's own kickoff
   else
-    OUT=$(KEEPER_KEYPAIR=$D/reporter1.json $KEEPER create-fixture --kickoff $KICK --id football-data=$MATCH)
-    ROOT=$(echo "$OUT" | awk '/^fixture_root:/{print $2}'); ORA=$(echo "$OUT" | awk '/^oracle:/{print $2}')
-    [ -n "$ROOT" ] && [ -n "$ORA" ] || { echo "create-fixture failed: $OUT"; exit 1; }
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$MATCH" "$ROOT" "$ORA" "$KICK" "$HOME_T" "$AWAY_T" >> "$RUN/fixtures.tsv"
-    python3 -I - "$RUN/watch.json" "$ROOT" "$MATCH" <<'PY'
-import json,sys
-p,root,mid=sys.argv[1:]
-w=json.load(open(p)); w.append({"fixture_root":root,"external_id":mid}); json.dump(w,open(p,"w"))
-PY
-    for i in 1 2; do python3 -I - "$RUN/mock-$i.json" "$MATCH" <<'PY'
-import json,sys
-p,mid=sys.argv[1:]
-s=json.load(open(p)); s[mid]={"status":"SCHEDULED","home":None,"away":None}; json.dump(s,open(p,"w"))
-PY
-    done
+    make_fixture "$MATCH" "$HOME_T" "$AWAY_T" "$KICK"
   fi
   local COMMON=(--creator "$D/creator.json" --mint "$MINT" --oracle "$ORA" --nonce $NONCE --condition "$COND"
     --question "$Q" --rubric-yes "$RY"
@@ -64,7 +71,7 @@ PY
   echo "market $MARKET  (nonce $NONCE, match $MATCH, kickoff $KICK, betting closes $((KICK - 120)))  $Q"
 }
 
-case ${1:?seed|live|backed|one} in
+case ${1:?seed|live|backed|match|fixture|one} in
   seed)
     # Match ids are unique per run: the oracle account of a match is derived from its id, so a fixed id could
     # only ever be registered once (a second run would fail with oracle error 6002 "already exists").
@@ -77,13 +84,30 @@ case ${1:?seed|live|backed|one} in
     ID=$(( 91000000000 + $(date +%s) ))
     one $ID Nigeria Ghana "${2:-330}" home-win "Will Nigeria beat Ghana? (live demo $ID)" "YES if Nigeria lead after 90 minutes, stoppage time included." "Nigeria win" "Draw or Ghana"
     echo "settle it with: devnet/04-settle.sh $ID 2 0" ;;
+  fixture)
+    # 03-markets.sh fixture "<home>" "<away>" <kickoff unix seconds>: only the oracle for a match, no market. A market is
+    # then created on it from the Create page (by anyone), the way a real operator would run it.
+    HOME_T=${2:?home team}; AWAY_T=${3:?away team}; KICK_AT=${4:?kickoff unix seconds}
+    [ $(( KICK_AT - $(date +%s) )) -ge 600 ] || { echo "kickoff must be at least 10 minutes away"; exit 1; }
+    ID=$(( 94000000000 + $(date +%s) ))
+    make_fixture $ID "$HOME_T" "$AWAY_T" $KICK_AT
+    echo "oracle ready for $HOME_T v $AWAY_T (oracle $ORA). Create its market from the Create page." ;;
+  match)
+    # 03-markets.sh match "<home>" "<away>" <kickoff unix seconds>
+    # A market for a REAL match at its real kickoff, titled "Will <home> beat <away>?": type the same words on another venue and
+    # the aggregator lists the two side by side. The result still comes from the labelled mock feed (see /demo).
+    HOME_T=${2:?home team}; AWAY_T=${3:?away team}; KICK_AT=${4:?kickoff unix seconds}
+    LEAD=$(( KICK_AT - $(date +%s) )); [ $LEAD -ge 600 ] || { echo "kickoff must be at least 10 minutes away"; exit 1; }
+    ID=$(( 94000000000 + $(date +%s) ))
+    one $ID "$HOME_T" "$AWAY_T" $LEAD home-win "Will $HOME_T beat $AWAY_T?" "YES if $HOME_T lead after 90 minutes, stoppage time included." "$HOME_T win" "Draw or loss"
+    echo "match market created for $HOME_T v $AWAY_T" ;;
   one) shift; one "$@" ;;
   backed)
     BACKED_SEED=${2:-30} RAISE_SECS=${3:-300}
     ID=$(( 92000000000 + $(date +%s) ))
     one $ID Nigeria Ghana $(( RAISE_SECS + 420 )) home-win "Will Nigeria beat Ghana? (crowd-seeded $ID)" "YES if Nigeria lead after 90 minutes, stoppage time included." "Nigeria win" "Draw or Ghana"
     echo "back the raise with: devnet/dbc.sh back <market> <usdc>   |   settle it with: devnet/04-settle.sh $ID 2 0" ;;
-  *) echo "usage: 03-markets.sh seed|live|backed|one"; exit 2 ;;
+  *) echo "usage: 03-markets.sh seed|live|backed|match|fixture|one"; exit 2 ;;
 esac
 # keepers read the watch file at start: restart them so they pick the new fixtures up
 if [ -z "$NO_RESTART" ] && [ -f "$RUN/keeper-1.pid" ]; then "$ENGINE/devnet/02-start.sh" >/dev/null && echo "keepers restarted"; fi

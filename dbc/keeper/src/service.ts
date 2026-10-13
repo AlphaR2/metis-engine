@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { timingSafeEqual } from "node:crypto";
 import { getAccount, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { jobById, makeFaucet, processStatus, startJob, type JobAction } from "./demo.js";
+import { fetchUpcoming } from "./upcoming.js";
 import { PublicKey } from "@solana/web3.js";
 import type { Env } from "./env.js";
 import type { Store } from "./store.js";
@@ -94,6 +95,11 @@ export function serve(env: Env, store: Store, port: number) {
       const body = req.method === "POST" ? JSON.parse(await new Promise<string>((ok) => { let s = ""; req.on("data", (c) => (s += c)); req.on("end", () => ok(s || "{}")); })) : {};
 
       const runDir = process.env.DEMO_RUN_DIR;
+      if (req.method === "GET" && url.pathname === "/demo/upcoming") {
+        const key = process.env.FOOTBALL_DATA_API_KEY;
+        if (!key) return json(res, 404, { error: "real fixtures are not switched on (no football data key)" });
+        return json(res, 200, await fetchUpcoming(key));
+      }
       if (req.method === "GET" && url.pathname === "/status") {
         const processes = processStatus(runDir);
         const slot = await env.conn.getSlot().catch(() => null);
@@ -108,7 +114,7 @@ export function serve(env: Env, store: Store, port: number) {
         if (!demoAllowed(req)) return json(res, process.env.DEMO_TOKEN ? 401 : 404, { error: process.env.DEMO_TOKEN ? "wrong demo token" : "demo controls are not switched on" });
         const scripts = process.env.DEMO_SCRIPTS_DIR;
         if (!scripts) return json(res, 404, { error: "demo scripts are not available here" });
-        if (req.method === "POST") return json(res, 202, startJob(scripts, body.action as JobAction, { seed: body.seed, raiseSecs: body.raiseSecs, leadSecs: body.leadSecs }));
+        if (req.method === "POST") return json(res, 202, startJob(scripts, body.action as JobAction, { seed: body.seed, raiseSecs: body.raiseSecs, leadSecs: body.leadSecs, home: body.home, away: body.away, kickoff: body.kickoff }));
         const job = jobById(url.pathname.split("/").pop() ?? "");
         return job ? json(res, 200, job) : json(res, 404, { error: "unknown job" });
       }
@@ -134,7 +140,8 @@ export function serve(env: Env, store: Store, port: number) {
       const m = url.pathname.match(/^\/markets\/([1-9A-HJ-NP-Za-km-z]+)$/);
       if (req.method === "GET" && m) {
         const entry = store.markets().find((x) => x.market === m[1]);
-        if (!entry) return json(res, 404, { error: "unknown market" });
+        // Not an Open Pool market (the site asks about every Metis market): a normal answer, not an error, so browsers log nothing red.
+        if (!entry) return json(res, 200, { unknown: true });
         const config = await ensureConfig(env, store, entry.seedAtoms);
         const prog = await progress(env, config, new PublicKey(entry.baseMint));
         const info = await marketInfo(env, new PublicKey(m[1])).catch(() => null);

@@ -81,7 +81,7 @@ export function processStatus(runDir: string | undefined): Record<string, boolea
   return out;
 }
 
-export type JobAction = "seed" | "live" | "backed" | "reset";
+export type JobAction = "seed" | "live" | "backed" | "match" | "fixture" | "reset";
 export interface Job {
   id: string;
   action: JobAction;
@@ -96,7 +96,7 @@ const jobs = new Map<string, Job>();
  * Runs one of the demo scripts. Only one at a time (they share a nonce counter and restart the
  * keepers), and the arguments are checked here: nothing from the caller is ever put in a shell string.
  */
-export function startJob(scriptsDir: string, action: JobAction, args: { seed?: number; raiseSecs?: number; leadSecs?: number }): Job {
+export function startJob(scriptsDir: string, action: JobAction, args: { seed?: number; raiseSecs?: number; leadSecs?: number; home?: string; away?: string; kickoff?: number }): Job {
   if ([...jobs.values()].some((j) => j.status === "running")) throw new Error("another demo job is still running");
   const int = (v: unknown, lo: number, hi: number, d: number) => {
     const n = v === undefined ? d : Number(v);
@@ -108,6 +108,18 @@ export function startJob(scriptsDir: string, action: JobAction, args: { seed?: n
     case "seed": argv = [join(scriptsDir, "03-markets.sh"), "seed"]; break;
     case "live": argv = [join(scriptsDir, "03-markets.sh"), "live", String(int(args.leadSecs, 150, 900, 330))]; break;
     case "backed": argv = [join(scriptsDir, "03-markets.sh"), "backed", String(int(args.seed, 30, 1000, 30)), String(int(args.raiseSecs, 90, 600, 300))]; break;
+    case "fixture":
+    case "match": {
+      // Team names go into a market title and a token label (24 bytes max): plain letters, digits and a few marks only.
+      const team = (v: unknown, what: string) => {
+        const t = String(v ?? "").trim();
+        if (!/^[A-Za-z0-9][A-Za-z0-9 .'&-]{1,17}$/.test(t)) throw new Error(`${what} must be 2 to 18 letters, digits or spaces`);
+        return t;
+      };
+      const now = Math.floor(Date.now() / 1000);
+      argv = [join(scriptsDir, "03-markets.sh"), action, team(args.home, "home team"), team(args.away, "away team"), String(int(args.kickoff, now + 600, now + 14 * 86400, now + 3600))];
+      break;
+    }
     case "reset": argv = [join(scriptsDir, "reset.sh")]; break;
     default: throw new Error("unknown action");
   }

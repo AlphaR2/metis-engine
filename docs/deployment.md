@@ -95,6 +95,7 @@ If either repo is public, remember that the code is then public. The keys are no
    | `RPC_URL` | your Helius devnet URL | Your Helius dashboard |
    | `DEMO_TOKEN` | a password you choose | You. You'll type it on the `/demo` page. |
    | `CORS_ORIGIN` | leave out for now | You'll add it in Part 6 |
+   | `FOOTBALL_DATA_API_KEY` | optional: a football-data.org token | Lets `/demo` list real upcoming matches (real teams and kickoff times) to build demo markets on. Without it that list is simply hidden. |
 
 6. **Settings → Networking → Generate Domain.** Railway gives an address like `metis-worker-production.up.railway.app`.
    Copy it. This is your **worker URL**.
