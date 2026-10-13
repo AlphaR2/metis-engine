@@ -17,7 +17,8 @@ for f in "${FILES[@]}"; do [ -f "$D/$f.json" ] || { echo "missing $D/$f.json"; e
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 for f in "${FILES[@]}"; do cp "$D/$f.json" "$TMP/"; done
 grep -v '^RPC_URL=' "$STATE" > "$TMP/state.env"     # the host sets its own RPC
-tar -czf - -C "$TMP" . | base64 | tr -d '\n' > "$OUT"
+# COPYFILE_DISABLE / --no-xattrs keep macOS metadata out of the bundle (it only produces warnings on the server)
+COPYFILE_DISABLE=1 tar $(tar --help 2>&1 | grep -q -- --no-xattrs && echo --no-xattrs) $(tar --help 2>&1 | grep -q -- --no-mac-metadata && echo --no-mac-metadata) -czf - -C "$TMP" . | base64 | tr -d '\n' > "$OUT"
 chmod 600 "$OUT"
 echo "wrote $OUT ($(wc -c < "$OUT" | tr -d ' ') bytes). It contains the demo's hot keys: treat it as a secret."
 echo "Set it as the worker's METIS_KEYS_B64 variable, then delete the file."

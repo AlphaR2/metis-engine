@@ -20,7 +20,8 @@ export DEMO_KEYS=${DEMO_KEYS:-/data/keys}
 mkdir -p "$DEMO_KEYS"; chmod 700 "$DEMO_KEYS"
 if [ ! -f "$DEMO_KEYS/operator.json" ]; then
   : "${METIS_KEYS_B64:?set METIS_KEYS_B64 (from devnet/pack-secrets.sh) for the first start}"
-  printf '%s' "$METIS_KEYS_B64" | base64 -d | tar -xzf - -C "$DEMO_KEYS"
+  # (a bundle packed on a Mac carries macOS file metadata that GNU tar warns about: harmless, so those lines are dropped)
+  printf '%s' "$METIS_KEYS_B64" | base64 -d | tar -xzf - -C "$DEMO_KEYS" 2> >(grep -v "Ignoring unknown extended header" >&2 || true)
   chmod 600 "$DEMO_KEYS"/*.json
   echo "keys unpacked into $DEMO_KEYS"
 fi

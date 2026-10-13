@@ -19,7 +19,11 @@ NO_RESTART=${NO_RESTART:-}
 
 one() {  # matchId home away lead condition question rubric_yes label_yes label_no
   local MATCH=$1 HOME_T=$2 AWAY_T=$3 LEAD=$4 COND=$5 Q=$6 RY=$7 LY=$8 LN=$9
-  local NONCE=$(( $(cat "$NONCE_FILE") + 1 )); echo $NONCE > "$NONCE_FILE"
+  # The nonce is part of the market's address and of its outcome tokens' addresses, and a closed market leaves its
+  # outcome tokens behind, so a nonce must NEVER be reused. Time never goes backwards, so it stays unique even if the
+  # counter file is lost (a restarted worker with no volume); the file only guards two markets in the same second.
+  local NOW LAST NONCE; NOW=$(date +%s); LAST=$(cat "$NONCE_FILE" 2>/dev/null || echo 0)
+  NONCE=$(( NOW > LAST ? NOW : LAST + 1 )); echo $NONCE > "$NONCE_FILE"
   local KICK=$(( $(date +%s) + LEAD ))
   local OUT ROOT ORA MARKET MARKET_OUT
   # one oracle per fixture: reuse it if this match already has one
@@ -70,13 +74,13 @@ case ${1:?seed|live|backed|one} in
     one $M2 Senegal Cameroon 108000 home-win "Will Senegal beat Cameroon?" "YES if Senegal lead after 90 minutes, stoppage time included." "Senegal win" "Draw or Cameroon"
     one $M2 Senegal Cameroon 108000 goals-over:2 "Will Senegal v Cameroon have 3 or more goals?" "YES if three or more goals are scored in 90 minutes." "3+ goals" "2 or fewer" ;;
   live)
-    ID=$(( 91000 + $(cat "$NONCE_FILE") + 1 ))
+    ID=$(( 91000000000 + $(date +%s) ))
     one $ID Nigeria Ghana "${2:-330}" home-win "Will Nigeria beat Ghana? (live demo $ID)" "YES if Nigeria lead after 90 minutes, stoppage time included." "Nigeria win" "Draw or Ghana"
     echo "settle it with: devnet/04-settle.sh $ID 2 0" ;;
   one) shift; one "$@" ;;
   backed)
     BACKED_SEED=${2:-30} RAISE_SECS=${3:-300}
-    ID=$(( 92000 + $(cat "$NONCE_FILE") + 1 ))
+    ID=$(( 92000000000 + $(date +%s) ))
     one $ID Nigeria Ghana $(( RAISE_SECS + 420 )) home-win "Will Nigeria beat Ghana? (crowd-seeded $ID)" "YES if Nigeria lead after 90 minutes, stoppage time included." "Nigeria win" "Draw or Ghana"
     echo "back the raise with: devnet/dbc.sh back <market> <usdc>   |   settle it with: devnet/04-settle.sh $ID 2 0" ;;
   *) echo "usage: 03-markets.sh seed|live|backed|one"; exit 2 ;;
